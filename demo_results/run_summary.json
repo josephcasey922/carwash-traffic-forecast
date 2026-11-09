@@ -1,0 +1,16 @@
+{
+  "model": "boosted",
+  "weather_source": "supplied offline weather CSV",
+  "site_count": 16,
+  "usable_labeled_hours": 16599,
+  "training_window_days": 90,
+  "validation_start_local": "2026-10-26",
+  "forecast_start_local": "2026-11-09",
+  "timezone": "America/Chicago",
+  "open_hour": 7,
+  "close_hour": 19,
+  "weather_observation_leakage_warning": "Historical features are realized/reconstructed weather, not archived as-of forecast runs. Backtest scores are optimistic for real next-day / 7-day decisions.",
+  "interval_warning": "Illustrative 80% validation-residual bands, not independently calibrated and not guaranteed conditional coverage; summing hourly bands is not a calibrated daily interval.",
+  "forecast_weather_gap_hours": 0,
+  "missing_weather_fraction_on_training": 0.0
+}

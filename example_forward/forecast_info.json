@@ -1,0 +1,17 @@
+{
+  "model": "mlp",
+  "models": [
+    "baseline",
+    "poisson",
+    "negbin",
+    "boosted",
+    "mlp"
+  ],
+  "weather_source": "offline archived forecast",
+  "revenue_per_wash_assumption": 12.5,
+  "revenue_warning": "Revenue is an illustrative car-count times assumed dollars per wash, not a true company revenue forecast.",
+  "asof_limitation": "Historical observed weather before issuance is reconstructed/provided; live inputs reflect request-time updates.",
+  "origin_local": "2026-11-08",
+  "actual_weather_issue_utc": "2026-11-09 00:00:00+00:00",
+  "hourly_records": 1344
+}

@@ -1,0 +1,6 @@
+model,mae,rmse,wape_percent,observations
+boosted,4.938,6.386,13.25,2562
+mlp,4.975,6.4,13.35,2562
+negbin,4.991,6.477,13.4,2562
+poisson,5.021,6.525,13.48,2562
+baseline,7.423,10.453,19.92,2562

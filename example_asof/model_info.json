@@ -1,0 +1,40 @@
+{
+  "version": "0.2",
+  "best_model": "mlp",
+  "models": [
+    "baseline",
+    "poisson",
+    "negbin",
+    "boosted",
+    "mlp"
+  ],
+  "timezone": "America/Chicago",
+  "issue_hour": 18,
+  "open_hour": 7,
+  "close_hour": 19,
+  "forecast_days": 7,
+  "origin_dates": [
+    "2026-08-20",
+    "2026-10-22"
+  ],
+  "origin_step_days": 7,
+  "validation_origins": [
+    "2026-10-15",
+    "2026-10-22"
+  ],
+  "last_training_target_utc": "2026-10-29 23:00:00+00:00",
+  "last_training_issued_at_utc": "2026-10-22 23:00:00+00:00",
+  "site_count": 16,
+  "training_examples": 10341,
+  "validation_examples": 2548,
+  "all_labeled_examples": 12905,
+  "weather_mode": "archived_as_of_from_csv",
+  "history_mode": "supplied_weather_csv",
+  "limitations": [
+    "Historical pre-issuance weather uses a supplied/reconstructed history, not a frozen real-time observation feed.",
+    "Rows can repeat a traffic target at different forecast origins; validation metrics are forecast-level errors.",
+    "Validation targets and training targets are separated chronologically, but final refit uses all labeled rows.",
+    "No forecast intervals are represented as calibrated probabilities.",
+    "Model accuracy on synthetic data is not evidence of real-world accuracy."
+  ]
+}

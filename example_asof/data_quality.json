@@ -1,0 +1,149 @@
+{
+  "sites": {
+    "100": {
+      "observed_rows": 1111,
+      "expected_nominal_open_hours": 1140,
+      "missing_nominal_open_hours": 29,
+      "missing_pct": 2.54,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "101": {
+      "observed_rows": 1104,
+      "expected_nominal_open_hours": 1152,
+      "missing_nominal_open_hours": 48,
+      "missing_pct": 4.17,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "102": {
+      "observed_rows": 1080,
+      "expected_nominal_open_hours": 1104,
+      "missing_nominal_open_hours": 24,
+      "missing_pct": 2.17,
+      "first_observed": "2026-08-06 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "103": {
+      "observed_rows": 1082,
+      "expected_nominal_open_hours": 1116,
+      "missing_nominal_open_hours": 34,
+      "missing_pct": 3.05,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "104": {
+      "observed_rows": 1121,
+      "expected_nominal_open_hours": 1152,
+      "missing_nominal_open_hours": 31,
+      "missing_pct": 2.69,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "105": {
+      "observed_rows": 1096,
+      "expected_nominal_open_hours": 1128,
+      "missing_nominal_open_hours": 32,
+      "missing_pct": 2.84,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "106": {
+      "observed_rows": 1076,
+      "expected_nominal_open_hours": 1116,
+      "missing_nominal_open_hours": 40,
+      "missing_pct": 3.58,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "107": {
+      "observed_rows": 1109,
+      "expected_nominal_open_hours": 1140,
+      "missing_nominal_open_hours": 31,
+      "missing_pct": 2.72,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "108": {
+      "observed_rows": 1115,
+      "expected_nominal_open_hours": 1140,
+      "missing_nominal_open_hours": 25,
+      "missing_pct": 2.19,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "109": {
+      "observed_rows": 1094,
+      "expected_nominal_open_hours": 1140,
+      "missing_nominal_open_hours": 46,
+      "missing_pct": 4.04,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "110": {
+      "observed_rows": 1135,
+      "expected_nominal_open_hours": 1152,
+      "missing_nominal_open_hours": 17,
+      "missing_pct": 1.48,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "111": {
+      "observed_rows": 1116,
+      "expected_nominal_open_hours": 1140,
+      "missing_nominal_open_hours": 24,
+      "missing_pct": 2.11,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "112": {
+      "observed_rows": 1121,
+      "expected_nominal_open_hours": 1152,
+      "missing_nominal_open_hours": 31,
+      "missing_pct": 2.69,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-08 23:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "113": {
+      "observed_rows": 1108,
+      "expected_nominal_open_hours": 1128,
+      "missing_nominal_open_hours": 20,
+      "missing_pct": 1.77,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "114": {
+      "observed_rows": 1107,
+      "expected_nominal_open_hours": 1140,
+      "missing_nominal_open_hours": 33,
+      "missing_pct": 2.89,
+      "first_observed": "2026-08-06 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    },
+    "115": {
+      "observed_rows": 1123,
+      "expected_nominal_open_hours": 1152,
+      "missing_nominal_open_hours": 29,
+      "missing_pct": 2.52,
+      "first_observed": "2026-08-05 12:00:00+00:00",
+      "last_observed": "2026-11-09 00:00:00+00:00",
+      "warning": "Missing is unknown; it is never converted to a zero count."
+    }
+  },
+  "disclaimer": "Nominal hours are based on --open-hour and --close-hour, not confirmed operating schedules."
+}
