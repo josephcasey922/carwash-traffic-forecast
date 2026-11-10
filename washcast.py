@@ -230,11 +230,16 @@ def open_hour_mask(local: pd.Series, open_hour: int = 8,
 def fill_missing_open_hours(traffic: pd.DataFrame, closures: set, timezone: str,
                             open_hour: int = 8, close_hour: int = 19,
                             sunday_open_hour: int = 9) -> tuple[pd.DataFrame, dict]:
-    """Fill absent ticket-count hours within each site's observed period with zero.
+    """Infer zero ticket counts ONLY on store-days with at least one observed hour.
 
-    This assumes no tickets while operating means zero washes. Never extrapolate
-    before the first recorded hour or after the last recorded hour for that site;
-    exclude known closed dates. Audit inferred full zero-days; they may be outages.
+    An entirely unobserved local store-day is unknown/closed, not a trustworthy
+    zero-demand day. Remove it from labeled data (training and evaluation), while
+    preserving its date and excluded-hour count in the quality report. Recorded
+    zero counts are always preserved. Do not extrapolate beyond a site's first
+    and last recorded timestamp; honor separately specified known closures.
+
+    A partially observed day still assumes that missing ticket-count hours mean
+    zero. This assumption should be reviewed against outage/closure records.
     """
     if traffic.empty:
         raise ValueError('Cannot generate operating hours from an empty traffic table')
@@ -252,17 +257,25 @@ def fill_missing_open_hours(traffic: pd.DataFrame, closures: set, timezone: str,
         frame = frame.merge(g[['timestamp', 'carwashes']], on='timestamp', how='left',
                             validate='one_to_one')
         frame['inferred_zero'] = frame.carwashes.isna()
-        frame['carwashes'] = frame.carwashes.fillna(0).astype('int64')
+        local_dates = frame.timestamp.dt.tz_convert(timezone).dt.date
+        # Group by LOCAL date: the same operating day must not become a different
+        # day after conversion to UTC (including daylight-saving transitions).
+        fully_missing = frame.groupby(local_dates)['inferred_zero'].transform('all')
+        full_days = sorted(str(x) for x in local_dates.loc[fully_missing].unique())
+        excluded_hours = int(fully_missing.sum())
+        raw_missing_hours = int(frame.inferred_zero.sum())
+        frame = frame.loc[~fully_missing].copy()
+        frame['carwashes'] = frame['carwashes'].fillna(0).astype('int64')
         frame['latitude'] = float(g.latitude.median())
         frame['longitude'] = float(g.longitude.median())
-        loc = frame.timestamp.dt.tz_convert(timezone)
-        days = loc.dt.date
-        full_days = [str(d) for d, dg in frame.groupby(days)
-                     if bool(dg.inferred_zero.all())]
         summary[str(site)] = {
             'observed_operating_hours': int((~frame.inferred_zero).sum()),
             'inferred_zero_hours': int(frame.inferred_zero.sum()),
-            'fully_inferred_zero_dates': full_days,
+            'raw_missing_operating_hours': raw_missing_hours,
+            'fully_inferred_zero_dates': full_days,  # historical report key
+            'excluded_full_missing_dates': full_days,
+            'excluded_full_missing_days': len(full_days),
+            'excluded_full_missing_hours': excluded_hours,
             'first_observed_hour_utc': str(first),
             'last_observed_hour_utc': str(last),
         }
@@ -270,10 +283,15 @@ def fill_missing_open_hours(traffic: pd.DataFrame, closures: set, timezone: str,
     filled = pd.concat(pieces, ignore_index=True)
     filled = filled[['timestamp','location_id','latitude','longitude','carwashes','inferred_zero']]
     filled = filled.sort_values(['location_id','timestamp']).reset_index(drop=True)
-    return filled, {'per_site': summary, 'total_inferred_zero_hours':
-                    int(filled.inferred_zero.sum()),
-                    'warning': ('Inferred zeros are assumptions, not verified counts. '
-                                'Review fully inferred days for closures, outages or export gaps.')}
+    return filled, {
+        'per_site': summary,
+        'total_inferred_zero_hours': int(filled.inferred_zero.sum()),
+        'total_excluded_full_missing_days': sum(x['excluded_full_missing_days'] for x in summary.values()),
+        'total_excluded_full_missing_hours': sum(x['excluded_full_missing_hours'] for x in summary.values()),
+        'warning': ('Fully missing store-days are excluded, never converted to zero labels. '
+                    'Missing hours on partly observed days are inferred zeros, not verified counts; '
+                    'review outages and partial-day closures.'),
+    }
 
 
 def quality_report(traffic: pd.DataFrame, closures: set, timezone: str,
@@ -437,12 +455,13 @@ def run(args) -> None:
     traffic,fill_report=fill_missing_open_hours(traffic,closures,args.timezone,
                            args.open_hour,args.close_hour,args.sunday_open_hour)
     print(f'Loaded {len(traffic):,} hourly observations, {traffic.location_id.nunique()} sites; '
-          f'{fill_report["total_inferred_zero_hours"]:,} zero-count hours inferred.')
+          f'{fill_report["total_inferred_zero_hours"]:,} zero-count hours inferred on active days; '
+          f'{fill_report["total_excluded_full_missing_days"]:,} full missing store-days excluded.')
     report={'before_fill':prefill_report,'zero_fill':fill_report}
     out=Path(args.output)
     out.mkdir(parents=True,exist_ok=True)
     (out/'data_quality.json').write_text(json.dumps(report,indent=2))
-    print('Data quality: absent operating hours filled as zero; see data_quality.json for flagged full-day gaps.')
+    print('Data quality: fully missing store-days excluded, isolated missing hours inferred as zero; see data_quality.json.')
     if args.weather_csv:
         weather=load_weather(args.weather_csv)
         source='supplied offline weather CSV'

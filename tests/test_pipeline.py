@@ -122,3 +122,47 @@ def test_sunday_zero_fill_starts_at_nine():
     assert list(sunday.timestamp.dt.tz_convert(z).dt.hour)==[9,10,11,12,13]
     assert sunday.carwashes.tolist()==[0,0,6,0,7]
     assert report['total_inferred_zero_hours']==3
+
+
+def test_fully_missing_store_day_excluded_but_partial_day_gaps_zero_filled():
+    """No invented 0-wash days may enter demand training or evaluation."""
+    z = 'America/Chicago'
+    local_hours = [
+        '2026-11-02 08:00', '2026-11-02 10:00',
+        '2026-11-04 08:00', '2026-11-04 11:00',
+    ]
+    ts = pd.to_datetime(local_hours).tz_localize(z).tz_convert('UTC')
+    traffic = pd.DataFrame({
+        'location_id': ['AL014']*len(ts), 'timestamp': ts,
+        'latitude': [33.5]*len(ts), 'longitude': [-86.6]*len(ts),
+        'carwashes': [10, 12, 15, 18],
+    })
+    result, report = washcast.fill_missing_open_hours(traffic, set(), z, 8, 19, 9)
+    local_dates = result.timestamp.dt.tz_convert(z).dt.date
+    assert date(2026,11,3) not in set(local_dates)
+    assert set(local_dates) == {date(2026,11,2),date(2026,11,4)}
+    # The original observed records remain unchanged.
+    for ts0, count in zip(ts, [10,12,15,18]):
+        assert result.loc[result.timestamp.eq(ts0),'carwashes'].iloc[0] == count
+        assert not result.loc[result.timestamp.eq(ts0),'inferred_zero'].iloc[0]
+    assert result.loc[result.timestamp.eq(pd.Timestamp('2026-11-02 09:00',tz=z).tz_convert('UTC')),
+                      'carwashes'].iloc[0] == 0
+    assert result.inferred_zero.sum() == 11  # partial-day gaps only
+    assert report['total_excluded_full_missing_days'] == 1
+    assert report['total_excluded_full_missing_hours'] == 11
+    assert report['per_site']['AL014']['excluded_full_missing_dates'] == ['2026-11-03']
+    assert report['per_site']['AL014']['raw_missing_operating_hours'] == 22
+
+
+def test_explicitly_recorded_zero_is_not_excluded():
+    z='America/Chicago'
+    times=pd.to_datetime(['2026-11-02 08:00','2026-11-03 10:00','2026-11-04 11:00']).tz_localize(z).tz_convert('UTC')
+    traffic=pd.DataFrame({'location_id':['A']*3,'timestamp':times,
+                          'latitude':[33.]*3,'longitude':[-86.]*3,'carwashes':[3,0,4]})
+    result,quality=washcast.fill_missing_open_hours(traffic,set(),z)
+    days=set(result.timestamp.dt.tz_convert(z).dt.date)
+    assert date(2026,11,3) in days
+    assert quality['total_excluded_full_missing_days']==0
+    actual_zero=result[result.timestamp.eq(times[1])].iloc[0]
+    assert actual_zero.carwashes == 0
+    assert not actual_zero.inferred_zero
