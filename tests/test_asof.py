@@ -74,3 +74,31 @@ def test_training_and_validation_target_disjointness():
                          'timestamp':times})
     training=sample[(sample.issued_at<earliest_validation)&(sample.timestamp<earliest_validation)]
     assert training.timestamp.max()<earliest_validation
+
+
+def test_archive_origin_filter_skips_missing_issuance_and_site():
+    origins = [date(2026, 6, 9), date(2026, 6, 10), date(2026, 6, 11)]
+    issues = [asof.issue_time(d, 'America/Chicago', 18).tz_convert('UTC') for d in origins]
+    archive = pd.DataFrame({'issued_at': [issues[0], issues[0], issues[2]],
+                            'location_id': ['AL002', 'AL003', 'AL002']})
+    available, skipped = asof.filter_complete_archive_origins(
+        archive, origins, {'AL002', 'AL003'}, 'America/Chicago', 18)
+    assert available == [date(2026, 6, 9)]
+    assert [x['issue_date'] for x in skipped] == ['2026-06-10', '2026-06-11']
+    assert [x['sites_present'] for x in skipped] == [0, 1]
+
+
+def test_archive_missing_origins_remain_errors_without_opt_in(tmp_path):
+    issue = asof.issue_time(date(2026, 6, 9), 'America/Chicago', 18).tz_convert('UTC')
+    path = tmp_path/'archive.csv'
+    pd.DataFrame({'issued_at':[str(issue)], 'timestamp':['2026-06-10T10:00Z'],
+                  'location_id':['AL002'], 'temperature_2m':[20],
+                  'precipitation':[0], 'cloud_cover':[0]}).to_csv(path,index=False)
+    with pytest.raises(ValueError, match='no forecasts'):
+        asof.archive_for_origins(pd.DataFrame(),
+            [date(2026, 6, 9),date(2026, 6, 10)],'America/Chicago',18,
+            '.weather_cache', str(path))
+    allowed = asof.archive_for_origins(pd.DataFrame(),
+        [date(2026, 6, 9),date(2026, 6, 10)],'America/Chicago',18,
+        '.weather_cache', str(path), allow_missing_origins=True)
+    assert len(allowed) == 1

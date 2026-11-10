@@ -148,7 +148,8 @@ def get_archive_run(session, site: str, lat: float, lon: float, issued_at: pd.Ti
 
 
 def archive_for_origins(traffic: pd.DataFrame, origins: list[date], tz: str,
-                        issue_hour: int, cache_dir: str, archive_csv: str | None) -> pd.DataFrame:
+                        issue_hour: int, cache_dir: str, archive_csv: str | None,
+                        allow_missing_origins: bool = False) -> pd.DataFrame:
     """Offline reproducible archive CSV, or strictly-as-of API retrieval.
 
     API requests are per site per issuance; can be substantial for many daily
@@ -159,7 +160,7 @@ def archive_for_origins(traffic: pd.DataFrame, origins: list[date], tz: str,
         expected = {issue_time(d, tz, issue_hour).tz_convert('UTC') for d in origins}
         actual = set(archive.issued_at.unique())
         missing = expected - actual
-        if missing:
+        if missing and not allow_missing_origins:
             raise ValueError(f'Archive CSV has no forecasts for {len(missing)} requested issue dates; examples {sorted(map(str,missing))[:3]}')
         return archive[archive.issued_at.isin(expected)].copy()
     session = session_with_retries()
@@ -172,6 +173,28 @@ def archive_for_origins(traffic: pd.DataFrame, origins: list[date], tz: str,
                                            issued, cache_dir))
         print(f'Archived weather ready: issued {dt} ({len(sites)} sites)',flush=True)
     return pd.concat(results, ignore_index=True)
+
+
+def filter_complete_archive_origins(archive: pd.DataFrame, origins: list[date],
+                                    sites: set[str], tz: str, issue_hour: int
+                                    ) -> tuple[list[date], list[dict]]:
+    """Keep only issuances that include all traffic sites. Never fill unavailable runs.
+
+    This only checks issuance/site coverage. make_rows still strictly checks the
+    forecasted weather for every requested target hour and will fail if incomplete.
+    """
+    present = (archive[archive.location_id.isin(sites)]
+               .groupby('issued_at')['location_id'].nunique().to_dict())
+    accepted, skipped = [], []
+    for d in origins:
+        issue = issue_time(d, tz, issue_hour).tz_convert('UTC')
+        count = int(present.get(issue, 0))
+        if count == len(sites):
+            accepted.append(d)
+        else:
+            skipped.append({'issue_date': str(d), 'issued_at_utc': str(issue),
+                            'sites_present': count, 'sites_expected': len(sites)})
+    return accepted, skipped
 
 
 def observed_weather(traffic: pd.DataFrame, weather_csv: str | None,
@@ -305,6 +328,8 @@ def save_meta(meta: dict,folder: Path):
 
 
 def fit(args):
+    if args.skip_missing_archive_origins and not args.archive_csv:
+        raise ValueError('--skip-missing-archive-origins requires --archive-csv')
     data,closures,quality=active_traffic(args)
     origins=dates_for_fit(data,args)
     out=Path(args.output); out.mkdir(parents=True,exist_ok=True)
@@ -315,7 +340,19 @@ def fit(args):
     max_needed=issue_time(origins[-1],args.timezone,args.issue_hour).tz_convert('UTC')+pd.Timedelta(days=args.forecast_days+2)
     selected=data[(data.timestamp>=min_needed)&(data.timestamp<=max_needed)].copy()
     realized=observed_weather(selected,args.weather_csv,args.cache_dir)
-    archive=archive_for_origins(selected,origins,args.timezone,args.issue_hour,args.cache_dir,args.archive_csv)
+    archive=archive_for_origins(selected,origins,args.timezone,args.issue_hour,args.cache_dir,args.archive_csv,
+                                allow_missing_origins=args.skip_missing_archive_origins)
+    if args.skip_missing_archive_origins:
+        site_ids = set(selected.location_id.astype(str).unique())
+        origins, skipped = filter_complete_archive_origins(archive,origins,site_ids,
+                                                            args.timezone,args.issue_hour)
+        pd.DataFrame(skipped,columns=['issue_date','issued_at_utc','sites_present','sites_expected']).to_csv(
+            out/'skipped_archive_origins.csv',index=False)
+        if skipped:
+            print(f'Skipped {len(skipped)} incomplete forecast issuances; details in '
+                  f'{out/"skipped_archive_origins.csv"}',flush=True)
+        if not origins:
+            raise ValueError('No complete archived forecast issuances remain in requested range')
     rows=make_rows(selected,realized,archive,origins,args.timezone,args.issue_hour,
                    args.forecast_days,args.open_hour,args.close_hour,closures,True,
                    sunday_open_hour=args.sunday_open_hour)
@@ -563,6 +600,8 @@ def make_parser():
     fit_p.add_argument('--validation-origins',type=int,default=2,help='Last N forecast origins used only for validation')
     fit_p.add_argument('--models',default='baseline,poisson,negbin,boosted,mlp')
     fit_p.add_argument('--output',default='asof_results')
+    fit_p.add_argument('--skip-missing-archive-origins',action='store_true',
+                       help='When --archive-csv is supplied, skip issuances missing one or more traffic sites; log them to CSV')
     f=sub.add_parser('forecast',parents=[common],help='Forecast from saved models without retraining')
     f.add_argument('--model-dir',default='asof_results')
     f.add_argument('--model',help='Only predict with this saved model')
