@@ -1,28 +1,25 @@
 .venv/
+.weather_cache/
 __pycache__/
 .pytest_cache/
-.weather_cache/
 *.pyc
 asof_results/
 forward_results/
 real_test/
 company_data/
 data_private/
+weather_data/
 *.env
 .env
 # Demo and example outputs are deliberately included in the downloadable ZIP.
-.venv/
-__pycache__/
-.pytest_cache/
-*.pyc
-.env
-.env.*
+
+# Company/private and downloaded weather/forecast datasets
+/real_results*/
+/real_forward*/
 *.joblib
-*.pkl
-data/
-real_data/
-real_test/
-asof_results/
-forward_results/
-.cache/
-weather_cache/
+
+# Offline rolling backtests of private company training examples
+/rolling_*/
+
+# Weather ablation and model-tuning reports built from private traffic labels
+/experiments_*/

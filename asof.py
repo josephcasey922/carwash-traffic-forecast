@@ -222,18 +222,22 @@ def combine_asof_weather(realized: pd.DataFrame, archive: pd.DataFrame, site: st
 def make_rows(traffic: pd.DataFrame, realized: pd.DataFrame, archive: pd.DataFrame,
               origins: list[date], tz: str, hour: int, horizon: int,
               open_hour: int, close_hour: int, closures: set,
-              labeled: bool, issued_overrides: dict[date,pd.Timestamp] | None = None) -> pd.DataFrame:
+              labeled: bool, issued_overrides: dict[date,pd.Timestamp] | None = None,
+              sunday_open_hour: int | None = None) -> pd.DataFrame:
     """For every issuance, build horizon-specific rows using only as-of weather.
 
     For training, join target washes only where a row exists. No imputed labels.
     Target-hour weather is drawn strictly from archived issuance-specific runs.
     """
     sites=traffic.groupby('location_id',as_index=False)[['latitude','longitude']].median()
-    target = traffic[['location_id','timestamp','carwashes']]
+    target_cols = ['location_id','timestamp','carwashes']
+    if 'inferred_zero' in traffic.columns:
+        target_cols.append('inferred_zero')
+    target = traffic[target_cols]
     result=[]
     for d in origins:
         issued=(issued_overrides or {}).get(d,issue_time(d,tz,hour).tz_convert('UTC'))
-        times=core.future_hours(d+timedelta(days=1),horizon,tz,open_hour,close_hour)
+        times=core.future_hours(d+timedelta(days=1),horizon,tz,open_hour,close_hour,sunday_open_hour)
         if len(times)==0:
             continue
         for s in sites.itertuples(index=False):
@@ -261,17 +265,22 @@ def make_rows(traffic: pd.DataFrame, realized: pd.DataFrame, archive: pd.DataFra
     return pd.concat(result,ignore_index=True)
 
 
-def active_traffic(args) -> tuple[pd.DataFrame,set]:
+def active_traffic(args) -> tuple[pd.DataFrame, set, dict]:
     traffic=core.load_traffic(args.traffic,args.timezone)
     closed=core.load_closures(args.closures)
     loc=traffic.timestamp.dt.tz_convert(args.timezone)
-    keep=(loc.dt.hour>=args.open_hour)&(loc.dt.hour<args.close_hour)
-    traffic=traffic[keep].copy()
+    traffic=traffic[core.open_hour_mask(loc,args.open_hour,args.close_hour,
+                                        args.sunday_open_hour)].copy()
     loc=traffic.timestamp.dt.tz_convert(args.timezone)
     traffic=traffic[~pd.Series(list(zip(traffic.location_id,loc.dt.date)),index=traffic.index).isin(closed)].copy()
     if traffic.empty:
         raise ValueError('No traffic after operating-hour and closure filters')
-    return traffic,closed
+    prefill=core.quality_report(traffic,closed,args.timezone,args.open_hour,
+                                args.close_hour,args.sunday_open_hour)
+    traffic,fill=core.fill_missing_open_hours(traffic,closed,args.timezone,
+                      args.open_hour,args.close_hour,args.sunday_open_hour)
+    report={'before_fill':prefill,'zero_fill':fill}
+    return traffic,closed,report
 
 
 def dates_for_fit(traffic: pd.DataFrame, args) -> list[date]:
@@ -296,12 +305,11 @@ def save_meta(meta: dict,folder: Path):
 
 
 def fit(args):
-    data,closures=active_traffic(args)
+    data,closures,quality=active_traffic(args)
     origins=dates_for_fit(data,args)
     out=Path(args.output); out.mkdir(parents=True,exist_ok=True)
     (out/'models').mkdir(exist_ok=True)
-    (out/'data_quality.json').write_text(json.dumps(
-        core.quality_report(data,closures,args.timezone,args.open_hour,args.close_hour),indent=2))
+    (out/'data_quality.json').write_text(json.dumps(quality,indent=2))
     # The source CSV can contain years, but API/history need only this selected training window.
     min_needed=issue_time(origins[0],args.timezone,args.issue_hour).tz_convert('UTC')-pd.Timedelta(days=5)
     max_needed=issue_time(origins[-1],args.timezone,args.issue_hour).tz_convert('UTC')+pd.Timedelta(days=args.forecast_days+2)
@@ -309,7 +317,8 @@ def fit(args):
     realized=observed_weather(selected,args.weather_csv,args.cache_dir)
     archive=archive_for_origins(selected,origins,args.timezone,args.issue_hour,args.cache_dir,args.archive_csv)
     rows=make_rows(selected,realized,archive,origins,args.timezone,args.issue_hour,
-                   args.forecast_days,args.open_hour,args.close_hour,closures,True)
+                   args.forecast_days,args.open_hour,args.close_hour,closures,True,
+                   sunday_open_hour=args.sunday_open_hour)
     # Strict cutoff: training targets must all occur before the earliest validation issue.
     if not 1<=args.validation_origins<len(origins):
         raise ValueError('Validation origins must be >= 1 and fewer than the total origins')
@@ -327,7 +336,10 @@ def fit(args):
     if len(set(models))!=len(models) or any(m not in core.ALL_MODELS for m in models):
         raise ValueError('Invalid or duplicate --models setting')
     details=[]
-    preds=val[['issued_at','location_id','timestamp','local_date','hour','lead_day','carwashes']].copy()
+    pred_cols=['issued_at','location_id','timestamp','local_date','hour','lead_day','carwashes']
+    if 'inferred_zero' in val.columns:
+        pred_cols.append('inferred_zero')
+    preds=val[pred_cols].copy()
     preds['split']='validation'
     for name in models:
         print(f'Validation fitting {name} with {len(train):,} rows; testing {len(val):,}...',flush=True)
@@ -353,12 +365,12 @@ def fit(args):
     # accidentally train the same labeled example twice.
     labeled_keys(rows).to_csv(out/'model_training_keys.csv', index=False)
     completed_at = utc_now()
-    meta={'version':'0.2.1','best_model':winner,'models':models,
+    meta={'version':'0.2.2','best_model':winner,'models':models,
           'last_full_fit_at_utc': completed_at, 'last_incremental_update_at_utc': None,
           'incremental_updates': 0, 'last_model_change_at_utc': completed_at,
           'runtime_versions': runtime_versions(),
           'timezone':args.timezone,'issue_hour':args.issue_hour,
-          'open_hour':args.open_hour,'close_hour':args.close_hour,
+          'open_hour':args.open_hour,'sunday_open_hour':args.sunday_open_hour,'close_hour':args.close_hour,
           'forecast_days':args.forecast_days,
           'origin_dates':[str(origins[0]),str(origins[-1])],
           'origin_step_days':args.origin_step,'validation_origins':[str(x) for x in validation_origins],
@@ -422,7 +434,13 @@ def forecast(args):
     folder=Path(args.model_dir)
     info,models=get_model_artifacts(folder,
         [args.model] if args.model else None)
-    traffic,closures=active_traffic(args)
+    # The data preprocessing schedule must match the schedule used for fitting.
+    if 'sunday_open_hour' not in info:
+        raise ValueError('This saved model predates Sunday-specific operating hours. Please run a full fit with v0.2.2.')
+    for key in ('open_hour','sunday_open_hour','close_hour'):
+        if getattr(args,key)!=info[key]:
+            raise ValueError(f'Forecast schedule {key} differs from saved model; use its schedule or refit')
+    traffic,closures,quality=active_traffic(args)
     tz=info['timezone']
     if args.timezone and args.timezone!=tz:
         raise ValueError(f'Model timezone is {tz}; requested {args.timezone}')
@@ -432,7 +450,8 @@ def forecast(args):
         args.cache_dir,int(info['forecast_days']))
     rows=make_rows(traffic,weather,archive,[origin],tz,int(info['issue_hour']),
                    int(info['forecast_days']),int(info['open_hour']),
-                   int(info['close_hour']),closures,False,{origin:issued_at})
+                   int(info['close_hour']),closures,False,{origin:issued_at},
+                   sunday_open_hour=int(info.get('sunday_open_hour',info['open_hour'])))
     # Forecast rows must not use labels; all as-of inputs should come from weather/cals.
     result=rows[['issued_at','location_id','timestamp','local_date','hour','lead_day',
                  'temperature_2m','precipitation']].copy()
@@ -472,7 +491,7 @@ def update(args):
     meta=json.loads((folder/'model_info.json').read_text())
     if 'mlp' not in meta['models']:
         raise ValueError('Model folder does not contain mlp; train it or use full fit')
-    data,closures=active_traffic(args)
+    data,closures,quality=active_traffic(args)
     origins=dates_for_fit(data,args)
     min_needed=issue_time(origins[0],args.timezone,args.issue_hour).tz_convert('UTC')-pd.Timedelta(days=5)
     max_needed=issue_time(origins[-1],args.timezone,args.issue_hour).tz_convert('UTC')+pd.Timedelta(days=args.forecast_days+2)
@@ -481,7 +500,8 @@ def update(args):
     archive=archive_for_origins(selected,origins,meta['timezone'],int(meta['issue_hour']),
                                 args.cache_dir,args.archive_csv)
     rows=make_rows(selected,weather,archive,origins,meta['timezone'],int(meta['issue_hour']),
-                   int(meta['forecast_days']),int(meta['open_hour']),int(meta['close_hour']),closures,True)
+                   int(meta['forecast_days']),int(meta['open_hour']),int(meta['close_hour']),closures,True,
+                   sunday_open_hour=int(meta.get('sunday_open_hour',meta['open_hour'])))
     # Filter at the exact issued-at / site / target-hour level.  Newly observed
     # targets from a previously partially labeled issue are still eligible.
     prior = saved_labeled_keys(folder)
@@ -521,7 +541,7 @@ def update(args):
 
 
 def make_parser():
-    p=argparse.ArgumentParser(description='Forecast-origin-aware carwash prediction pipeline v0.2.1')
+    p=argparse.ArgumentParser(description='Forecast-origin-aware carwash prediction pipeline v0.2.2')
     sub=p.add_subparsers(dest='command',required=True)
     common=argparse.ArgumentParser(add_help=False)
     common.add_argument('--traffic',required=True)
@@ -530,7 +550,8 @@ def make_parser():
     common.add_argument('--closures',help='Optional CSV location_id,date of full-day closures')
     common.add_argument('--cache-dir',default='.weather_cache')
     common.add_argument('--timezone',default='America/Chicago')
-    common.add_argument('--open-hour',type=int,default=7)
+    common.add_argument('--open-hour',type=int,default=8,help='Monday-Saturday opening hour')
+    common.add_argument('--sunday-open-hour',type=int,default=9,help='Sunday opening hour')
     common.add_argument('--close-hour',type=int,default=19)
     train_parent=argparse.ArgumentParser(add_help=False,parents=[common])
     train_parent.add_argument('--start-date',help='First local forecast ISSUE date, YYYY-MM-DD')
@@ -564,12 +585,12 @@ def main(argv=None):
             'incremental_updates','last_model_change_at_utc','last_training_target_utc',
             'last_training_issued_at_utc','runtime_versions')},indent=2))
         return
-    if not 0<=args.open_hour<args.close_hour<=24:
+    if not 0<=args.open_hour<args.close_hour<=24 or not 0<=args.sunday_open_hour<args.close_hour:
         raise ValueError('Operating hours must satisfy 0 <= open < close <= 24')
     if args.command in ('fit','update'):
         if args.command=='update':
             prior=json.loads((Path(args.model_dir)/'model_info.json').read_text())
-            for key in ('timezone','open_hour','close_hour','issue_hour','forecast_days'):
+            for key in ('timezone','open_hour','sunday_open_hour','close_hour','issue_hour','forecast_days'):
                 if getattr(args,key)!=prior[key]:
                     raise ValueError(f'Update setting {key} must equal saved model setting {prior[key]}; full refit instead')
         if args.origin_step<1 or not (1<=args.forecast_days<=7):

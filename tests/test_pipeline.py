@@ -78,3 +78,47 @@ def test_offline_run_creates_outputs(tmp_path):
     meta=json.loads((out/'run_summary.json').read_text())
     assert meta['site_count']==2
     assert 'optimistic' in meta['weather_observation_leakage_warning'].lower()
+
+
+def test_scheduled_hours_are_8_to_19_except_sunday_9_to_19():
+    tz='America/Chicago'
+    monday=washcast.future_hours(date(2026,11,2),1,tz,8,19,9)
+    sunday=washcast.future_hours(date(2026,11,8),1,tz,8,19,9)
+    monday_local=monday.tz_convert(tz)
+    sunday_local=sunday.tz_convert(tz)
+    assert list(monday_local.hour)==list(range(8,19))
+    assert list(sunday_local.hour)==list(range(9,19))
+
+
+def test_infer_interior_missing_washes_and_leave_edges_and_closures(tmp_path):
+    path=tmp_path/'raw.csv'
+    # Verify the user's company-export columns including alphanumeric location ID.
+    path.write_text('hour,location_code_id,longitude,latitude,num_carwashes\n'
+        '2026-11-02T10:00:00-06:00,AL001,-86.28,33.61,5\n'
+        '2026-11-02T12:00:00-06:00,AL001,-86.28,33.61,7\n'
+        '2026-11-04T08:00:00-06:00,AL001,-86.28,33.61,1\n'
+        '2026-11-04T10:00:00-06:00,AL001,-86.28,33.61,2\n')
+    traffic=washcast.load_traffic(str(path),'America/Chicago')
+    filled,report=washcast.fill_missing_open_hours(traffic,{('AL001',date(2026,11,3))},
+                                                   'America/Chicago',8,19,9)
+    hours=filled.timestamp.dt.tz_convert('America/Chicago').dt.strftime('%Y-%m-%d %H:%M').tolist()
+    expected_first=[f'2026-11-02 {h:02d}:00' for h in range(10,19)]
+    assert hours == expected_first+['2026-11-04 08:00','2026-11-04 09:00','2026-11-04 10:00']
+    assert filled.carwashes.tolist()==[5,0,7]+[0]*6+[1,0,2]
+    assert filled.inferred_zero.tolist()==[False,True,False]+[True]*6+[False,True,False]
+    assert report['total_inferred_zero_hours']==8
+
+
+def test_sunday_zero_fill_starts_at_nine():
+    z='America/Chicago'
+    ts=pd.to_datetime(['2026-11-07T18:00:00-06:00',
+                       '2026-11-08T11:00:00-06:00',
+                       '2026-11-08T13:00:00-06:00'],utc=True)
+    traffic=pd.DataFrame({'location_id':['A']*3,'timestamp':ts,
+                          'latitude':[33.]*3,'longitude':[-86.]*3,'carwashes':[5,6,7]})
+    filled,report=washcast.fill_missing_open_hours(traffic,set(),z,8,19,9)
+    loc=filled.timestamp.dt.tz_convert(z)
+    sunday=filled[loc.dt.date==date(2026,11,8)]
+    assert list(sunday.timestamp.dt.tz_convert(z).dt.hour)==[9,10,11,12,13]
+    assert sunday.carwashes.tolist()==[0,0,6,0,7]
+    assert report['total_inferred_zero_hours']==3

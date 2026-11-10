@@ -3,15 +3,15 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.weather_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/weather_data" />
     </content>
-    <orderEntry type="jdk" jdkName="~\Documents\GitHub\carwash-traffic-forecast\.venv" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="~\Documents\GitHub\carwash-traffic-forecast-v0.2.6\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
-  <component name="PackageRequirementsSettings" />
   <component name="PyDocumentationSettings">
     <option name="format" value="PLAIN" />
   </component>
-  <component name="ReSTService" />
   <component name="TestRunnerService">
     <option name="PROJECT_TEST_RUNNER" value="py.test" />
   </component>

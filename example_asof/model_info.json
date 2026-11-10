@@ -1,5 +1,5 @@
 {
-  "version": "0.2",
+  "version": "0.2.2",
   "best_model": "mlp",
   "models": [
     "baseline",
@@ -8,9 +8,21 @@
     "boosted",
     "mlp"
   ],
+  "last_full_fit_at_utc": "2026-11-09T15:08:45+00:00",
+  "last_incremental_update_at_utc": null,
+  "incremental_updates": 0,
+  "last_model_change_at_utc": "2026-11-09T15:08:45+00:00",
+  "runtime_versions": {
+    "python": "3.13.5",
+    "scikit_learn": "1.8.0",
+    "numpy": "2.3.5",
+    "pandas": "2.2.3",
+    "joblib": "1.5.3"
+  },
   "timezone": "America/Chicago",
   "issue_hour": 18,
-  "open_hour": 7,
+  "open_hour": 8,
+  "sunday_open_hour": 9,
   "close_hour": 19,
   "forecast_days": 7,
   "origin_dates": [
@@ -25,9 +37,9 @@
   "last_training_target_utc": "2026-10-29 23:00:00+00:00",
   "last_training_issued_at_utc": "2026-10-22 23:00:00+00:00",
   "site_count": 16,
-  "training_examples": 10341,
-  "validation_examples": 2548,
-  "all_labeled_examples": 12905,
+  "training_examples": 9613,
+  "validation_examples": 2367,
+  "all_labeled_examples": 11996,
   "weather_mode": "archived_as_of_from_csv",
   "history_mode": "supplied_weather_csv",
   "limitations": [

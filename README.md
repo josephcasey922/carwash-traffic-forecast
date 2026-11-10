@@ -1,6 +1,226 @@
-# WashCast v0.2.1 — compatibility and incremental updates
+# WashCast v0.2.6 — Post-rain error explorer, weather ablations and MLP tuning
 
-**If a v0.2 forecast crashed with `InconsistentVersionWarning` or `No module named _loss`:** the bundled example models were created under scikit-learn 1.8.0 and might not load in your local scikit-learn 1.9.1. **Do not suppress that warning.** v0.2.1 defaults to forecasting with only the selected model (`--model mlp`) and checks model-version compatibility before loading. First create new saved models in **your** environment by running the demo fit below. Pretrained example `.joblib` binaries are intentionally not provided in this zip.
+**New in v0.2.6:** an offline post-rain error explorer in the existing **Weather & MLP experiments** dashboard tab. It ranks location-days where weather-aware boosting performs worse than the historical baseline, displays the next-two-day traffic forecast against actual counts, and plots issued hourly rain and the preceding 72-hour rainfall accumulation. Optional reconstructed historical weather CSV can be shown for the preceding three days; that retrospective information is not used to fit or generate the predictions. The new helper is `rain_explorer.py`.
+
+**Previously added in v0.2.5:** `experiments.py` and a **Weather & MLP experiments** tab in Streamlit. This version retains the existing v0.2.4 ingestion, training, forecasting, rolling-backtest, and saved-model commands unchanged. The new program is a **fully offline evaluation** of previously generated `asof_training_examples.csv` (using archived weather forecast snapshots). It never calls a weather API, does not overwrite existing models, and does not update the operational forecast model.
+
+## Question 1: Does weather add predictive value beyond the season and calendar?
+
+Paired ablation compares the same algorithm on the same historical test hours:
+
+- `boosted_calendar` vs `boosted_weather`
+- `mlp_calendar` vs `mlp_weather`
+- `baseline` (site / weekday / hour median reference)
+
+Calendar features include site, latitude, longitude, local hour, weekday, month, holiday/weekend, trigonometric hour/weekday, `lead_day`, and **new cyclic day-of-year features (`season_sin`, `season_cos`)**. Weather versions additionally include forecasted temperature, hourly precipitation, cloud cover, and the preceding 24h/72h rainfall known or forecast at issuance. Both weather and calendar models use identical target hours, training windows, and model-family settings. These experiments measure **predictive usefulness**, not causal weather effects.
+
+### First experiment: quickly compare boosting with and without weather (no API)
+
+```powershell
+.\.venv\Scripts\python.exe experiments.py `
+  --examples real_results_no_AL001/asof_training_examples.csv `
+  --reconstructed-weather-csv weather_data/historical_weather.csv `
+  --window-days 180 `
+  --test-origins 8 `
+  --models baseline,boosted `
+  --output experiments_180d
+```
+
+`--reconstructed-weather-csv` is **optional**. It is only used **after predictions exist**, to group errors by reconstructed target-hour rain and see when an archived forecast missed significant rain. Reconstructed weather must NEVER be used as an as-of target-hour feature for the traffic forecast: this would leak future information. If you don't have this file, omit the option.
+
+Also test a 90-day training window on the same held-out weeks:
+
+```powershell
+.\.venv\Scripts\python.exe experiments.py `
+  --examples real_results_no_AL001/asof_training_examples.csv `
+  --reconstructed-weather-csv weather_data/historical_weather.csv `
+  --window-days 90 `
+  --test-origins 8 `
+  --models baseline,boosted `
+  --output experiments_90d
+```
+
+### Question 2: Are rainy weeks hidden by the pooled average?
+
+The experimental reports include:
+
+- `overall_metrics.csv`: all-hour pooled MAE, RMSE, WAPE.
+- `equal_week_metrics.csv`: **average of individual forecast-week MAEs**, so a week with more observations doesn't dominate.
+- `by_issuance.csv`, `by_issue_and_regime.csv`: separate results for each forecast week, and rainy/dry regimes within it.
+- `weather_gain_overall.csv`, `weather_gain_by_issuance.csv`, `weather_gain_by_regime.csv`, `weather_gain_by_month.csv`, `weather_gain_by_lead_day.csv`: **paired difference** `calendar MAE − weather MAE` on matched test hours; positive means weather helped.
+- `by_weather_regime.csv`: forecasts with >=0.5 mm precipitation in target hour, otherwise >=5 mm total in previous 72 hours, otherwise dry. **Regimes use the archived forecast**, not future actual weather.
+- With the optional historical weather CSV: `by_reconstructed_rain.csv`, `weather_gain_by_reconstructed_rain.csv`, `by_unforecast_rain_event.csv`, `weather_gain_by_unforecast_rain_event.csv`. These are strictly retrospective summaries of reconstructed weather, not a claim about ground-station observations.
+- `by_inferred_zero.csv` and `experiment_predictions.csv`: inspect assumed zero-ticket hours and individual forecast errors.
+
+A heavy storm not predicted by the archived weather forecast can be grouped as *forecast dry*; the retrospective reconstructed-weather output helps diagnose that. Compare **counts of examples in each group**: a very small wet sample gives noisy conclusions. Examine severe weeks separately rather than weighting them arbitrarily to win a model comparison.
+
+### Question 3: Is the MLP trained long enough, without overfitting?
+
+The new tuned MLP performs *nested chronological evaluation* at each rolling test origin:
+
+1. Among the already-past outer training forecast origins, reserve the last `--mlp-validation-origins` origins for **inner validation**.
+2. Fit normalization/encoders on **inner training only**; train 1 Adam epoch at a time; track training and future inner-validation MAE.
+3. Use patience-based validation early stopping, selecting the best number of epochs and MLP topology/L2 penalty **without consulting the outer test week**.
+4. Refit a fresh MLP on **all permissible outer training examples** for the chosen number of epochs, and evaluate on the untouched outer week.
+
+This avoids scikit-learn's random early-stopping split, which is unsuitable for chronological forecasting. It is a development experiment and does not yet replace the MLP in `asof.py fit/forecast`.
+
+**MLP run** (two layer-size/regularization choices, up to 300 epochs; can take appreciably longer):
+
+```powershell
+.\.venv\Scripts\python.exe experiments.py `
+  --examples real_results_no_AL001/asof_training_examples.csv `
+  --reconstructed-weather-csv weather_data/historical_weather.csv `
+  --window-days 180 `
+  --test-origins 8 `
+  --models baseline,boosted,mlp `
+  --mlp-candidates "12x6:0.3,24x12:1.5,32x16:0.3" `
+  --mlp-epochs 300 `
+  --mlp-patience 20 `
+  --output experiments_180d_tuned
+```
+
+Start with `--test-origins 2 --mlp-epochs 80 --mlp-candidates "12x6:0.3"` to smoke-test the MLP before committing to all eight weeks and several candidates. The code saves `mlp_tuning.csv` and `mlp_learning_curves.csv`; Streamlit plots the learning curves per historic issuance/configuration. Beware: tune-and-compare across the same eight weeks is still **model selection**, not an untouched final test.
+
+### October versus March: weather or another seasonal factor?
+
+The ablation keeps calendar and cyclic day-of-year features in **both** variants so we can see whether weather improves predictions above a seasonal baseline. The feature contribution alone cannot establish causality. To evaluate both March and October, the test selection must include **held-out forecast issuances for BOTH months**, not just the last eight autumn weeks. Using the saved **weekly** archived forecast origins (no extra downloads), you can investigate March 2026 with a 90-day window:
+
+```powershell
+.\.venv\Scripts\python.exe experiments.py `
+  --examples real_results_no_AL001/asof_training_examples.csv `
+  --reconstructed-weather-csv weather_data/historical_weather.csv `
+  --test-from 2026-03-01 --test-to 2026-03-31 `
+  --test-origins 5 --window-days 90 --models baseline,boosted `
+  --output experiments_march_90d
+```
+
+If there aren't enough forecast origins before the requested test dates, the script explains the problem rather than silently using future data. Weekly-only archive dates still confound lead day with weekday; full daily-origin backtesting remains a future project.
+
+### Dashboard
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run dashboard.py
+```
+
+Sidebar **Weather ablation / MLP experiments**: enter `experiments_180d` or `experiments_180d_tuned`, then open **Weather & MLP experiments**. Displays overall errors, paired weather gains, weather regimes, per-week and monthly gains, tuning choices/epoch curves, and an hourly chart of held-out predictions.
+
+**New post-rain inspection:** open **Investigate post-rain errors · traffic and weather timeline** in the same tab. The ranked table focuses exclusively on hours tagged `Rain in previous 72h` by *archived forecast conditions*, not observed past rain. Select any listed forecast issue, location and date to see actual car washes, baseline/calendar/weather model predictions, hourly archived forecast rain, and the 72h rainfall total over the issued two-day forecast. Supply `weather_data/daily_partial/historical_weather.csv` in the optional field to overlay reconstructed historical rain going back up to 72 hours before the first target. This diagnostic never calls the weather API, does not modify model files, and does not prove a causal rain rebound.
+
+
+Outputs from real data are private. `.gitignore` excludes `/experiments_*/`, `/weather_data/`, and the private-data/result folders. Review any staged git files before pushing.
+
+---
+
+# WashCast v0.2.4 — Offline rolling-origin backtesting
+
+This version **does not change existing forecasting or model-training commands**. It adds `backtest.py` and a Streamlit **Rolling backtest** tab so the archived weather and traffic examples you already built can be evaluated on more than two weeks — **without any API calls**.
+
+## Verify your inputs
+
+Use the **one-year fit's** already-created `asof_training_examples.csv` (which contains all labeled historical forecast rows, including rows previously labeled `train`, `purged`, and `validation`). This script **ignores the old `split` designation** and creates fresh chronological train/test splits at each historical forecast issuance.
+
+Your historical year-long weather bundle and your original traffic CSV are *not* needed for this step. The examples file already has the matched weather and actual ticket counts. Keep it **off GitHub**, as it contains company data.
+
+### Backtest using a 180-day rolling window
+
+```powershell
+.\.venv\Scripts\python.exe backtest.py `
+  --examples real_results_1yr/asof_training_examples.csv `
+  --window-days 180 `
+  --test-origins 8 `
+  --models baseline,boosted,mlp `
+  --output rolling_180d
+```
+
+### Backtest using a 90-day rolling window, on identical test weeks
+
+```powershell
+.\.venv\Scripts\python.exe backtest.py `
+  --examples real_results_1yr/asof_training_examples.csv `
+  --window-days 90 `
+  --test-origins 8 `
+  --models baseline,boosted,mlp `
+  --output rolling_90d
+```
+
+Both commands use exactly the **last eight issuance dates in the input CSV**. Their test rows can therefore be compared directly. If your original one-year fit ran at weekly issue dates, the script tests eight weekly 7-day forecasts. Each fold **fits a fresh model on only past labels** from the specified number of days and then evaluates the next week's as-of archived forecast. Results are a fair comparison of rolling training windows, although not yet a final independent test.
+
+To compare the generated metrics:
+
+```powershell
+Import-Csv rolling_180d/overall_metrics.csv | Format-Table -AutoSize
+Import-Csv rolling_90d/overall_metrics.csv | Format-Table -AutoSize
+```
+
+To inspect the largest errors by week and lead day:
+
+```powershell
+Import-Csv rolling_90d/by_issue_and_lead.csv | Sort-Object {[double]$_.mae} -Descending | Select-Object -First 15 | Format-Table -AutoSize
+```
+
+Then launch the existing dashboard:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run dashboard.py
+```
+
+In the sidebar, enter `rolling_180d` as **Rolling backtest results**, optionally `rolling_90d` as the **Compare** folder, then open the **Rolling backtest** tab. The dashboard checks that both comparisons contain **exactly the same target rows** before showing side-by-side MAE.
+
+### Output files
+
+- `backtest_predictions.csv`: actual vs. predicted hourly wash count, model, issuance date, and signed/absolute error for every fold
+- `overall_metrics.csv`: MAE, RMSE, WAPE, count, signed bias per model across all tested weeks
+- `by_issuance.csv`: whether particular forecast weeks were unusually difficult
+- `by_issue_and_lead.csv`: which origin/lead-day pairs cause unusually large errors
+- `by_lead_day.csv`, `by_location.csv`, `by_weekday.csv`: grouped diagnostics
+- `by_inferred_zero.csv`: compare prediction errors for inferred-zero and recorded-hour labels
+- `backtest_info.json`: chosen rolling window, historical issuance dates, and last included training target for each fold
+
+The backtest **does not overwrite saved production models** or change the existing 6-month and 1-year fit results. Each fold refits the requested candidate models for evaluation only; it doesn't perform continuous MLP `partial_fit` updates. It retains the current model settings (no custom chronological MLP early stopping yet).
+
+### Important limits
+
+1. **Weekly-only issuance dates mean lead day and target weekday remain confounded.** A daily archived forecast bundle, fetched once later, would let us compare the same target date at several forecast leads.
+2. **The last eight origins are not independent hourly observations.** Summarize MAE by forecast week and inspect the variability across weeks before drawing firm conclusions.
+3. **Inferred zeros may represent system outages or unrecorded closures.** Check `data_quality.json` and `by_inferred_zero.csv` before trusting the scores.
+4. **A full 365-day rolling model comparison over eight weeks requires enough prior archived forecast issuance dates.** With roughly one year of weekly origin data, the early backtest weeks may lack a full year of training history. Start with 90 and 180 days; download additional archived origins later if a complete 365-day window is required.
+5. **This is validation for model development, not a final untouched test.** For a final accuracy claim, reserve still-later dates after choosing models and hyperparameters.
+
+---
+
+# WashCast v0.2.2 — schedule-aware hourly wash counts
+
+**New operating-hour defaults:** Monday–Saturday **8:00 AM–7:00 PM** (hour starts 8 through 18) and Sunday **9:00 AM–7:00 PM** (starts 9 through 18), in `America/Chicago` by default. No training or forecast rows are produced outside those times. The schedule applies to every site until site-specific hours are implemented.
+
+**Zero-ticket hours:** Within each site's first and last *observed* timestamp, missing operating-hour rows are now filled with `carwashes=0` and `inferred_zero=True`. Actual recorded zeros remain `inferred_zero=False`. No rows are invented before a site's first ticket or after its last ticket, and known full-day closures in `closures.csv` are excluded. The `data_quality.json` report contains counts of inferred zeros and lists completely inferred zero days. **Review any such days:** they may represent outages, closures, or incomplete exports rather than real zero traffic. Partial-day closures are not yet supported.
+
+**Your company export works without column renaming:**
+
+```csv
+hour,location_code_id,longitude,latitude,num_carwashes
+2025-02-04T11:00:00-06:00,AL001,-86.2800751,33.6110764,6
+```
+
+The `washcast.py` importer accepts both these column names and the original `timestamp,location_id,latitude,longitude,carwashes` schema. Offset-aware timestamps are converted to UTC for matching the weather, while opening-hour rules use local time.
+
+A fresh training run is required after this preprocessing change. **Do not reuse v0.2.1 model files:** they were trained with a different schedule and zero-hour policy. For example:
+
+```powershell
+.\.venv\Scripts\python.exe asof.py fit `
+  --traffic "C:\data\traffic.csv" `
+  --start-date 2025-08-01 --end-date 2025-10-31 `
+  --models baseline,mlp `
+  --output asof_results_v022
+```
+
+These dates are only an example; use a real period covered by your export and archived weather. The command contacts the weather API unless you supply both offline weather CSVs (`--weather-csv`, `--archive-csv`); confirm authorization and licensing first. Saved training metadata now records both opening-hour settings. For offline testing, run the synthetic example below, with a new output directory.
+
+---
+
+# WashCast v0.2.1 — prior compatibility and incremental-update notes
+
+**If a v0.2 forecast crashed with `InconsistentVersionWarning` or `No module named _loss`:** the bundled example models were created under scikit-learn 1.8.0 and might not load in your local scikit-learn 1.9.1. **Do not suppress that warning.** v0.2.2 defaults to forecasting with only the selected model (`--model mlp`) and checks model-version compatibility before loading. First create new saved models in **your** environment by running the demo fit below. Pretrained example `.joblib` binaries are intentionally not provided in this zip.
 
 ### Quick offline fix (Windows PowerShell, no API)
 
@@ -54,7 +274,7 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-The ZIP includes demo data, a simulated archive of weather *forecasts issued on past dates*, and example results already produced by all five models. It doesn't require an Internet connection to inspect the dashboard.
+The ZIP includes demo data, a simulated archive of weather *forecasts issued on past dates*, and updated example charts/results produced by all five models under the new schedule. Saved estimator `.joblib` files are intentionally excluded; fit models locally under your installed dependency versions. It doesn't require an Internet connection to inspect the dashboard.
 
 ### Launch the Streamlit app
 
@@ -92,7 +312,7 @@ The included demo contains 16 fictional sites, about 96 days of *simulated* hour
 
 ## 3 — Tomorrow: one real CSV, chosen date window
 
-Export **exactly** these columns (extra columns are allowed):
+Export these columns (extra columns are allowed); the company aliases shown above also work:
 
 ```csv
 timestamp,location_id,latitude,longitude,carwashes
@@ -103,18 +323,18 @@ timestamp,location_id,latitude,longitude,carwashes
 
 The timestamps may represent hourly counts, or individual washes (`carwashes=1` on each event). The pipeline sums multiple rows in a site/hour. Naive timestamps are interpreted using `--timezone`, so confirm UTC vs local time in your source. Use offset-aware timestamps whenever possible. **All sites must share a timezone in v0.2.** DST-ambiguous naive timestamps fail loudly rather than silently being shifted.
 
-**Data reliability:** Recorded zeros stay zero. Missing expected hourly records are **unknown**, not zero. Provide a `closures.csv` with `location_id,date` for confirmed *entire-day* closures; site-specific/partial-day hours require later work. Keep all two years of history in the same CSV and choose which *forecast issuance dates* become training candidates:
+**Data reliability in v0.2.2:** Recorded zeros stay zero; absent operating-hour records between a site's first and last ticket become *inferred* zeros. Review the zero-fill audit before modeling, particularly completely inferred days. Provide a `closures.csv` with `location_id,date` for confirmed *entire-day* closures; site-specific/partial-day hours require later work. Keep all two years of history in the same CSV and choose which *forecast issuance dates* become training candidates:
 
 ```powershell
 .\.venv\Scripts\python.exe asof.py fit `
   --traffic "C:\data\traffic.csv" `
   --start-date 2026-08-01 --end-date 2026-10-31 `
   --origin-step 7 --validation-origins 2 `
-  --timezone America/Chicago --open-hour 7 --close-hour 19 `
+  --timezone America/Chicago --open-hour 8 --sunday-open-hour 9 --close-hour 19 `
   --output asof_results
 ```
 
-If `--start-date` and `--end-date` are omitted, the system selects approximately the most recent 90 days of forecast origins through the last day with recorded hourly counts minus one day. It reads the full CSV but only asks the weather service for the time window needed for these origins, and it only includes observed traffic labels in that window.
+If `--start-date` and `--end-date` are omitted, the system selects approximately the most recent 90 days of forecast origins through the last day with recorded hourly counts minus one day. It reads the full CSV but only asks the weather service for the time window needed for these origins, and it includes observed traffic labels and operating-hour zeros inferred within each site's recorded date range.
 
 **The command above uses the weather API. Do not run it with work data until the API provider has approved/licensed your intended use.** The public Open-Meteo free API is non-commercial. If you have downloaded *historical observed/reconstructed* and *historical issued forecast* weather CSVs from an approved source, add `--weather-csv ... --archive-csv ...` to avoid any API request. You can set `OPEN_METEO_SINGLE_RUN_URL`, `OPEN_METEO_HISTORY_URL`, and `OPEN_METEO_API_KEY` for supported licensed endpoints; confirm endpoint entitlement and parameter compatibility with your provider.
 
@@ -188,7 +408,7 @@ This uses the original fitted feature encoder/scaler and only `partial_fit`s the
 - `horizon_metrics.csv` — errors by 1–7-day lead time.
 - `models/*.joblib` — saved models and preprocessing. **Do not load unknown joblib files.**
 - `model_info.json` — training dates, origins, caveats, and chosen best model.
-- `data_quality.json` — missing nominal scheduled-hour diagnostics.
+- `data_quality.json` — expected/observed scheduled-hour diagnostics, inferred-zero counts, and entirely inferred days flagged for review.
 
 `example_forward/` (or your `--output` from `forecast`):
 
@@ -205,6 +425,69 @@ Prediction intervals are deliberately **not** marked as calibrated 80% intervals
 - [Forecast API](https://open-meteo.com/en/docs) — latest forecasts for current production-style predictions.
 - [Open-Meteo terms](https://open-meteo.com/en/terms) — **the public Free API is non-commercial**. Obtain a relevant paid license or organization-approved weather-data source for use at a car wash business.
 
-Only one timezone, one nominal set of hours for all locations, and a whole-day closure list are supported. A forecaster trained at 6 PM local may work differently at 8 AM; investigate issuance-hour sensitivity. Historical forecast API access has **not been executed/verified from this environment**; real-world API errors, gaps, licensing, and payload differences must be checked before company use. The synthetic scores do not establish real car wash predictive accuracy.
+Only one timezone, the Monday–Saturday/Sunday schedule common to all sites, and a whole-day closure list are supported. A forecaster trained at 6 PM local may work differently at 8 AM; investigate issuance-hour sensitivity. Historical forecast API access has **not been executed/verified from this environment**; real-world API errors, gaps, licensing, and payload differences must be checked before company use. The synthetic scores do not establish real car wash predictive accuracy.
 
 The original `washcast.py` from v0.1 remains as an introductory, **reconstructed-weather** experiment; `asof.py` is the updated, forecast-origin-aware workflow. See `README_v0.1.md` for legacy instructions. Use `asof.py` for all serious as-of backtests.
+
+## v0.2.3 — Download archived weather once, train as many times as needed offline
+
+The existing `asof.py fit` calls Open-Meteo whenever `--weather-csv` and
+`--archive-csv` are omitted (unless identical URL+parameters are already cached
+in `.weather_cache`). `weather_bundle.py` separates the download step from training.
+
+You **cannot** download an entire year of *as-issued* seven-day forecasts as one
+continuous time series: a weekly backtest requires a distinct archived weather
+model run for every site and every issue date. The script performs these calls
+**once as a batch**, caches individual responses (resumable), then exports two
+ordinary CSV files. Later fits are fully offline.
+
+From the folder containing `asof.py` and `weather_bundle.py`, first download a
+bundle covering the longest training experiment you plan to run. Substitute
+actual dates that exist in your traffic CSV, where test targets after the last
+issue date are also recorded:
+
+```powershell
+.\.venv\Scripts\python.exe weather_bundle.py `
+  --traffic data/carwash_traffic.csv `
+  --start-date 2025-10-21 `
+  --end-date 2026-10-20 `
+  --origin-step 7 `
+  --output weather_data
+```
+
+Then **reuse those CSVs without contacting Open-Meteo**:
+
+```powershell
+# Full-year candidates — offline
+.\.venv\Scripts\python.exe asof.py fit `
+  --traffic data/carwash_traffic.csv `
+  --weather-csv weather_data/historical_weather.csv `
+  --archive-csv weather_data/archived_forecasts.csv `
+  --start-date 2025-10-21 `
+  --end-date 2026-10-20 `
+  --origin-step 7 `
+  --models baseline,poisson,negbin,boosted,mlp `
+  --output real_results_1yr
+
+# Six-month candidates — same issue-date cadence and final date, offline
+.\.venv\Scripts\python.exe asof.py fit `
+  --traffic data/carwash_traffic.csv `
+  --weather-csv weather_data/historical_weather.csv `
+  --archive-csv weather_data/archived_forecasts.csv `
+  --start-date 2026-04-07 `
+  --end-date 2026-10-20 `
+  --origin-step 7 `
+  --models baseline,poisson,negbin,boosted,mlp `
+  --output real_results_6mo
+```
+
+**Important limitations:** the bundle contains archived weather only for the
+weekly issue dates selected, so changing `--origin-step` to 1 requires
+additional downloaded runs. A live forecast for tomorrow/next week also needs
+a new forecast snapshot; offline training is different from having continually
+updated future weather. Open-Meteo licensing requirements still apply.
+
+The bundle includes location IDs and coordinate-derived weather data. Keep
+`weather_data/` out of Git, and keep company traffic CSVs outside a public repo.
+`weather_bundle.py` does not upload wash counts, only coordinates, dates, and
+weather variables are sent to Open-Meteo.

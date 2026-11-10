@@ -1,4 +1,4 @@
-"""Local Streamlit viewer/controller for as-of carwash forecasting v0.2.
+"""Local Streamlit viewer/controller for as-of carwash forecasting v0.2.6.
 
 Run: streamlit run dashboard.py
 All files, weather caches, and model artifacts stay on the computer hosting it.
@@ -16,10 +16,12 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 import washcast as core
 import asof
+from rain_explorer import rank_post_rain_periods, one_issued_forecast
 import sklearn
 if 'lead_day' not in core.NUM:
     core.NUM.append('lead_day')
@@ -32,6 +34,9 @@ with st.sidebar:
     st.header('Project folders')
     model_dir=st.text_input('Training results',value='asof_results')
     forward_dir=st.text_input('Forecast results',value='example_forward')
+    rolling_dir=st.text_input('Rolling backtest results',value='rolling_180d')
+    compare_dir=st.text_input('Compare against backtest folder (optional)',value='')
+    experiment_dir=st.text_input('Weather ablation / MLP experiments',value='experiments_180d')
     st.caption('Use absolute paths if Streamlit starts outside the project folder. Do not upload company CSVs to a public Streamlit deployment.')
 
 
@@ -63,16 +68,16 @@ def run_cli(args: list[str]):
     return process.returncode==0
 
 
-def common_cli(traffic, weather, archive, closures, timezone, open_hour, close_hour):
+def common_cli(traffic, weather, archive, closures, timezone, open_hour, sunday_open_hour, close_hour):
     result=['--traffic',traffic,'--timezone',timezone,
-            '--open-hour',str(open_hour),'--close-hour',str(close_hour)]
+            '--open-hour',str(open_hour),'--sunday-open-hour',str(sunday_open_hour),'--close-hour',str(close_hour)]
     if weather.strip():result+=['--weather-csv',weather.strip()]
     if archive.strip():result+=['--archive-csv',archive.strip()]
     if closures.strip():result+=['--closures',closures.strip()]
     return result
 
-train_tab,validation_tab,behavior_tab,forecast_tab,control_tab=st.tabs([
-    'Training timeline','Holdout validation','How models behave','Next-week forecast','Train / refresh / update'])
+train_tab,validation_tab,behavior_tab,forecast_tab,control_tab,rolling_tab,experiments_tab=st.tabs([
+    'Training timeline','Holdout validation','How models behave','Next-week forecast','Train / refresh / update','Rolling backtest','Weather & MLP experiments'])
 
 folder=Path(model_dir)
 info=meta(folder/'model_info.json')
@@ -274,13 +279,14 @@ with control_tab:
     tz=st.text_input('Site timezone',value=info.get('timezone','America/Chicago'))
     a,b=st.columns(2)
     with a:
-        open_hour=st.number_input('Open hour (24-hour)',min_value=0,max_value=23,value=7)
+        open_hour=st.number_input('Monday–Saturday opening hour (24-hour)',min_value=0,max_value=23,value=8)
     with b:
-        close_hour=st.number_input('Close hour (exclusive)',min_value=1,max_value=24,value=19)
+        sunday_open_hour=st.number_input('Sunday opening hour (24-hour)',min_value=0,max_value=23,value=9)
+        close_hour=st.number_input('Closing hour (exclusive)',min_value=1,max_value=24,value=19)
     api_required=not bool(archive.strip() and weather.strip())
     confirmed=st.checkbox('I have authorization and a compatible weather-data license for any live API requests',value=False)
     enabled=not api_required or confirmed
-    common=common_cli(traffic,weather,archive,closures,tz,open_hour,close_hour)
+    common=common_cli(traffic,weather,archive,closures,tz,open_hour,sunday_open_hour,close_hour)
     st.markdown('#### Full fit / rebuild')
     a,b,c=st.columns(3)
     with a:start_date=st.date_input('First issuance date',value=date(2026,8,20))
@@ -317,3 +323,276 @@ with control_tab:
             cmd=['update',*common,'--model-dir',model_dir,'--start-date',str(u_start),'--end-date',str(u_end),'--origin-step','1']
             if run_cli(cmd):st.rerun()
     st.markdown('**Typical cadence:** refresh next-week forecasts daily without retraining; optionally update the MLP after new actual counts arrive; run a full chronological refit weekly/monthly or after a substantial operational change.')
+
+
+with rolling_tab:
+    st.subheader('Rolling-origin backtest · multiple genuinely out-of-sample forecast weeks')
+    st.caption('Each historical issuance uses a freshly fitted model trained only on labels available before that issuance. This test runs from local CSV files and does not contact the weather API.')
+    rp=Path(rolling_dir)
+    overall=table(rp/'overall_metrics.csv')
+    issue_metrics=table(rp/'by_issuance.csv')
+    lead_metrics=table(rp/'by_lead_day.csv')
+    pair_metrics=table(rp/'by_issue_and_lead.csv')
+    location_metrics=table(rp/'by_location.csv')
+    weekday_metrics=table(rp/'by_weekday.csv')
+    roll_pred=table(rp/'backtest_predictions.csv')
+    roll_info=meta(rp/'backtest_info.json')
+    if overall is None or issue_metrics is None or roll_pred is None:
+        st.info('Run `backtest.py` in PowerShell first, then enter its output folder above.')
+        st.code(r'.\.venv\Scripts\python.exe backtest.py --examples real_results_1yr/asof_training_examples.csv --window-days 180 --test-origins 8 --models baseline,boosted,mlp --output rolling_180d',language='powershell')
+    else:
+        st.write('Rolling window (days):',roll_info.get('window_days','?'),
+                 ' · Held-out weekly issuances:',roll_info.get('test_origins','?'))
+        st.dataframe(overall,use_container_width=True,hide_index=True)
+        st.plotly_chart(px.bar(overall,x='model',y='mae',text='mae',title='Overall backtest MAE'),use_container_width=True)
+        st.plotly_chart(px.line(issue_metrics,x='issue_date',y='mae',color='model',markers=True,
+                                title='Error by historical forecast issuance'),use_container_width=True)
+        if lead_metrics is not None:
+            st.plotly_chart(px.line(lead_metrics,x='lead_day',y='mae',color='model',markers=True,
+                                    title='Error by lead day across all test weeks'),use_container_width=True)
+        if pair_metrics is not None and len(pair_metrics):
+            model_for_map=st.selectbox('Inspect issuance × lead-day errors',sorted(pair_metrics.model.unique()),key='rolling_heat_model')
+            matrix=pair_metrics[pair_metrics.model==model_for_map]
+            heat=px.density_heatmap(matrix,x='lead_day',y='issue_date',z='mae',histfunc='avg',
+                                   title=f'{model_for_map} · MAE by forecast week and lead day',
+                                   labels={'lead_day':'Lead day','issue_date':'Forecast issued','mae':'MAE'})
+            st.plotly_chart(heat,use_container_width=True)
+        c1,c2=st.columns(2)
+        with c1:
+            if location_metrics is not None:
+                chosen_model=st.selectbox('Model for site-error analysis',sorted(location_metrics.model.unique()),key='rolling_site_model')
+                locations=location_metrics[location_metrics.model==chosen_model].sort_values('mae',ascending=False)
+                st.plotly_chart(px.bar(locations,x='location_id',y='mae',title=f'{chosen_model}: MAE by location'),use_container_width=True)
+        with c2:
+            if weekday_metrics is not None:
+                st.plotly_chart(px.line(weekday_metrics,x='dow',y='mae',color='model',markers=True,
+                                        title='Error by target weekday (0 = Monday)'),use_container_width=True)
+        st.markdown('**Inspect an individual forecast**')
+        roll_pred['location_id']=roll_pred.location_id.astype(str)
+        site=st.selectbox('Location',sorted(roll_pred.location_id.unique()),key='rolling_site')
+        issued=st.selectbox('Forecast issuance',sorted(roll_pred.issue_date.unique()),key='rolling_origin')
+        filtered=roll_pred[(roll_pred.location_id==site)&(roll_pred.issue_date==issued)].copy()
+        day=st.selectbox('Target local date',sorted(filtered.local_date.unique()),key='rolling_day')
+        filtered=filtered[filtered.local_date==day]
+        plot=go.Figure()
+        first=filtered[filtered.model==filtered.model.iloc[0]].sort_values('hour')
+        plot.add_trace(go.Scatter(x=first.hour,y=first.carwashes,mode='lines+markers',name='Actual',line={'width':4}))
+        for model_name,g in filtered.groupby('model'):
+            g=g.sort_values('hour')
+            plot.add_trace(go.Scatter(x=g.hour,y=g.prediction,mode='lines+markers',name=model_name))
+        plot.update_layout(xaxis_title='Local hour',yaxis_title='Washes',title=f'Forecast issued {issued} for {day} · {site}')
+        st.plotly_chart(plot,use_container_width=True)
+        if compare_dir.strip():
+            cp=Path(compare_dir.strip())
+            other=table(cp/'overall_metrics.csv')
+            other_pred=table(cp/'backtest_predictions.csv')
+            other_info=meta(cp/'backtest_info.json')
+            if other is not None and other_pred is not None:
+                keys=['issued_at','location_id','timestamp','carwashes']
+                k1=roll_pred[keys].drop_duplicates().astype(str).sort_values(keys).reset_index(drop=True)
+                k2=other_pred[keys].drop_duplicates().astype(str).sort_values(keys).reset_index(drop=True)
+                if not k1.equals(k2):
+                    st.warning('These backtests do NOT contain identical evaluation targets. Compare only if you intentionally accept different test samples.')
+                else:
+                    st.markdown('**Same-test-rows comparison**')
+                    merged=overall[['model','mae']].rename(columns={'mae':f"{roll_info.get('window_days','A')}d MAE"}).merge(
+                        other[['model','mae']].rename(columns={'mae':f"{other_info.get('window_days','B')}d MAE"}),on='model',how='outer')
+                    st.dataframe(merged,use_container_width=True,hide_index=True)
+            else:
+                st.warning('Comparison folder does not contain a complete rolling backtest.')
+        st.warning('Weekly weather archives cannot separate lead time from target weekday. More daily issuance snapshots are required for that analysis. The rolling backtest is a development evaluation, not a final untouched test set.')
+
+
+with experiments_tab:
+    st.subheader('Weather ablation and chronological MLP tuning')
+    st.caption('Offline, matched examples: calendar-only versus weather-informed models on exactly the same held-out forecast hours. '
+               'Positive weather gain means weather lowers MAE. This is predictive, not a proof of weather causality.')
+    ep=Path(experiment_dir)
+    eoverall=table(ep/'overall_metrics.csv')
+    egain=table(ep/'weather_gain_overall.csv')
+    eregime=table(ep/'weather_gain_by_regime.csv')
+    eweek=table(ep/'weather_gain_by_issuance.csv')
+    emonth=table(ep/'weather_gain_by_month.csv')
+    ereconstructed=table(ep/'weather_gain_by_reconstructed_rain.csv')
+    emiss=table(ep/'weather_gain_by_unforecast_rain_event.csv')
+    elearning=table(ep/'mlp_learning_curves.csv')
+    etune=table(ep/'mlp_tuning.csv')
+    einfo=meta(ep/'experiment_info.json')
+    eall=table(ep/'experiment_predictions.csv')
+    if eoverall is None:
+        st.info('Run experiments.py offline first and point the sidebar to its output folder.')
+        st.code(r'.\.venv\Scripts\python.exe experiments.py --examples real_results_no_AL001/asof_training_examples.csv --window-days 180 --test-origins 8 --models baseline,boosted --output experiments_180d',language='powershell')
+    else:
+        st.write('Rolling training window:',einfo.get('window_days','?'),'days · Historical forecast issuances:',einfo.get('test_origins','?'))
+        st.dataframe(eoverall,use_container_width=True,hide_index=True)
+        st.plotly_chart(px.bar(eoverall,x='variant',y='mae',text='mae',title='Forecast MAE · identical evaluated hours'),use_container_width=True)
+        if egain is not None and len(egain):
+            st.markdown('**Paired weather improvement (calendar MAE minus weather MAE)**')
+            st.dataframe(egain,use_container_width=True,hide_index=True)
+            st.caption('Positive numbers are improvements. Negative numbers mean weather worsened the predictions.')
+        if eregime is not None and len(eregime):
+            st.markdown('**Are rainy conditions getting lost in the overall average?**')
+            st.plotly_chart(px.bar(eregime,x='weather_regime',y='weather_gain_washes_per_hour',color='algorithm',
+                                   barmode='group',hover_data=['observations','calendar_mae','weather_mae'],
+                                   title='Added predictive value of weather by forecast-weather regime'),use_container_width=True)
+            st.dataframe(eregime,use_container_width=True,hide_index=True)
+            st.caption('Based on archived FORECAST precipitation: target rain >= 0.5 mm/h, otherwise previous 72h rain >= 5 mm. '
+                       'An unanticipated storm may be labeled dry here, because the archived forecast did not foresee it.')
+        if eweek is not None and len(eweek):
+            st.markdown('**Weather gains by forecast week**')
+            st.plotly_chart(px.bar(eweek,x='issue_date',y='weather_gain_washes_per_hour',color='algorithm',
+                                   barmode='group',hover_data=['observations','calendar_mae','weather_mae'],
+                                   title='Weather benefit or harm by historical forecast issuance'),use_container_width=True)
+            st.dataframe(eweek,use_container_width=True,hide_index=True)
+        if ereconstructed is not None and len(ereconstructed):
+            st.markdown('**Reconstructed target-hour rainfall (retrospective diagnostic only)**')
+            st.plotly_chart(px.bar(ereconstructed,x='reconstructed_rain_regime',y='weather_gain_washes_per_hour',
+                                   color='algorithm',barmode='group',hover_data=['observations'],
+                                   title='Weather value when the target hour was actually rainy (reconstructed)'),
+                            use_container_width=True)
+            st.caption('This groups results AFTER prediction using the separately supplied reconstructed historical weather. '
+                       'It is never included in model inputs, and is not a verified station observation.')
+        if emiss is not None and len(emiss):
+            st.markdown('**Rain that archived forecasts missed**')
+            st.dataframe(emiss,use_container_width=True,hide_index=True)
+        if emonth is not None and len(emonth):
+            st.markdown('**Weather gains by target month**')
+            st.plotly_chart(px.bar(emonth,x='target_month',y='weather_gain_washes_per_hour',color='algorithm',
+                                   barmode='group',title='Weather contributions by month of target hour'),use_container_width=True)
+            st.caption('March versus October needs held-out forecast dates in BOTH months. '
+                       'A last-eight-weeks experiment cannot tell us about March.')
+        if etune is not None and len(etune):
+            st.markdown('**MLP inner-validation tuning selections**')
+            st.dataframe(etune,use_container_width=True,hide_index=True)
+        if elearning is not None and len(elearning):
+            st.markdown('**MLP training vs validation across epochs**')
+            issue=st.selectbox('Historical forecast issuance', sorted(elearning.issued_at.unique()),key='exp_origin')
+            feature=st.selectbox('Feature version', sorted(elearning.feature_set.unique()),key='exp_feature')
+            part=elearning[(elearning.issued_at==issue)&(elearning.feature_set==feature)]
+            config=st.selectbox('MLP configuration',sorted(part.candidate.unique()),key='exp_candidate')
+            part=part[part.candidate==config]
+            long=part.melt(id_vars=['epoch'],value_vars=['inner_training_mae','inner_validation_mae'],
+                           var_name='series',value_name='MAE')
+            st.plotly_chart(px.line(long,x='epoch',y='MAE',color='series',
+                                    title='Chronological inner-validation learning curves'),use_container_width=True)
+            st.caption('The best epoch/configuration was chosen only from inner validation within each training fold. '
+                       'The outer test week was not used to stop the MLP.')
+        if eall is not None and len(eall):
+            with st.expander('Inspect predicted versus actual for one held-out forecast'):
+                location=st.selectbox('Location code',sorted(eall.location_id.astype(str).unique()),key='exp_site')
+                issue=st.selectbox('Issuance date',sorted(eall.issue_date.unique()),key='exp_issue')
+                filt=eall[(eall.location_id.astype(str)==location)&(eall.issue_date==issue)]
+                target=st.selectbox('Target date',sorted(filt.local_date.unique()),key='exp_target')
+                filt=filt[filt.local_date==target]
+                fig=go.Figure()
+                actual=filt[filt.variant==filt.variant.iloc[0]].sort_values('hour')
+                fig.add_trace(go.Scatter(x=actual.hour,y=actual.carwashes,name='Actual',mode='lines+markers',line={'width':4}))
+                for v,g in filt.groupby('variant'):
+                    g=g.sort_values('hour')
+                    fig.add_trace(go.Scatter(x=g.hour,y=g.prediction,name=v,mode='lines+markers'))
+                fig.update_layout(title=f'{location} · {target} · issued {issue}',xaxis_title='Local hour',yaxis_title='Washes')
+                st.plotly_chart(fig,use_container_width=True)
+        with st.expander('Investigate post-rain errors · traffic and weather timeline'):
+            st.caption('Ranks the post-rain hours where weather-aware boosting underperforms the historical '
+                       'baseline. Uses saved experiment_predictions.csv only; no API requests or retraining.')
+            postrain = rank_post_rain_periods(eall)
+            if postrain.empty:
+                st.info('No matched post-rain baseline and boosted-weather forecasts are available in this experiment.')
+            else:
+                st.markdown('**Find the worst post-rain location-days**')
+                display_cols = ['issue_date', 'location_id', 'local_date', 'hours',
+                                'baseline_mae', 'weather_mae', 'extra_mae_vs_baseline', 'weather_signed_bias']
+                st.dataframe(postrain[display_cols].head(40).round(2), use_container_width=True, hide_index=True)
+                st.caption('Positive extra MAE means boosted weather did worse than baseline. '
+                           'Signed bias is prediction minus actual; a negative value indicates underprediction. '
+                           'Only hours labeled \'Rain in previous 72h\' contribute to this ranking.')
+                chosen = st.selectbox(
+                    'Inspect location and target day (sorted by additional post-rain error)',
+                    options=list(range(len(postrain))),
+                    format_func=lambda j: (
+                        f"{postrain.iloc[j]['local_date']} · {postrain.iloc[j]['location_id']} "
+                        f"· issued {postrain.iloc[j]['issue_date']} · "
+                        f"extra MAE {postrain.iloc[j]['extra_mae_vs_baseline']:+.2f}"),
+                    key='postrain_selected')
+                selected = postrain.iloc[chosen]
+                period = one_issued_forecast(eall, str(selected['issue_date']), str(selected['location_id']))
+                if period.empty:
+                    st.warning('No detailed predictions found for this location and issuance.')
+                else:
+                    period = period.copy()
+                    period['local_clock'] = (pd.to_datetime(period['timestamp'], utc=True)
+                                             .dt.tz_convert('America/Chicago').dt.tz_localize(None))
+                    plot = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                                         row_heights=[0.57, 0.19, 0.24], vertical_spacing=.075,
+                                         subplot_titles=('Actual traffic compared with model forecasts',
+                                                         'Rain forecast for each target hour (mm)',
+                                                         'Forecast rainfall accumulated over preceding 72h (mm)'))
+                    plot.add_trace(go.Scatter(x=period.local_clock, y=period.carwashes,
+                                              name='Actual washes', mode='lines+markers',
+                                              line={'width': 4, 'color': '#222222'}), row=1, col=1)
+                    for name, label, dash in [
+                        ('prediction_baseline', 'Historical baseline', 'dash'),
+                        ('prediction_boosted_calendar', 'Boosted, calendar only', 'dot'),
+                        ('prediction_boosted_weather', 'Boosted, with weather', 'solid'),
+                        ('prediction_mlp_weather', 'MLP, with weather', 'longdash'),
+                    ]:
+                        if name in period.columns:
+                            plot.add_trace(go.Scatter(x=period.local_clock, y=period[name],
+                                                      name=label, mode='lines+markers',
+                                                      line={'dash': dash}), row=1, col=1)
+                    if 'forecast_rain_target_mm' in period:
+                        plot.add_trace(go.Bar(x=period.local_clock, y=period.forecast_rain_target_mm,
+                                              name='Archived forecast rain', opacity=.72), row=2, col=1)
+                    if 'forecast_rain_prior_72h_mm' in period:
+                        plot.add_trace(go.Scatter(x=period.local_clock, y=period.forecast_rain_prior_72h_mm,
+                                                  mode='lines+markers', name='Prior 72h forecast rain'), row=3, col=1)
+                    history_path = st.text_input('Optional reconstructed historical weather CSV (for earlier rainfall context)',
+                                                 value='', key='postrain_history_csv',
+                                                 help='For example: weather_data/daily_partial/historical_weather.csv. '
+                                                      'Only read locally; never contacts a weather service.')
+                    if history_path.strip():
+                        histfile = Path(history_path.strip())
+                        if histfile.is_file():
+                            try:
+                                h = pd.read_csv(histfile,
+                                                usecols=lambda c: c in {'timestamp','location_id','precipitation'})
+                                if {'timestamp','location_id','precipitation'}.issubset(h.columns):
+                                    h = h[h.location_id.astype(str) == str(selected['location_id'])].copy()
+                                    h['timestamp'] = pd.to_datetime(h.timestamp, utc=True, errors='coerce')
+                                    begin = pd.to_datetime(period.timestamp.min(), utc=True) - pd.Timedelta(hours=72)
+                                    finish = pd.to_datetime(period.timestamp.max(), utc=True)
+                                    h = h[h.timestamp.between(begin, finish)]
+                                    if len(h):
+                                        h['local_clock'] = h.timestamp.dt.tz_convert('America/Chicago').dt.tz_localize(None)
+                                        plot.add_trace(go.Scatter(x=h.local_clock, y=h.precipitation,
+                                                                  name='Reconstructed historical rain',
+                                                                  mode='lines', line={'dash': 'dash'}), row=2, col=1)
+                                    else:
+                                        st.info('No matching reconstructed weather observations in the selected time window.')
+                                else:
+                                    st.warning('Historical weather file needs timestamp, location_id, precipitation columns.')
+                            except Exception as error:
+                                st.warning(f'Could not load the optional historical weather CSV: {error}')
+                        else:
+                            st.warning('Historical weather file not found at that path.')
+                    plot.update_yaxes(title_text='Washes/hour', rangemode='tozero', row=1, col=1)
+                    plot.update_yaxes(title_text='mm/h', rangemode='tozero', row=2, col=1)
+                    plot.update_yaxes(title_text='mm', rangemode='tozero', row=3, col=1)
+                    plot.update_xaxes(title_text='Local date/time · America/Chicago', row=3, col=1)
+                    plot.update_layout(height=790, hovermode='x unified', legend={'orientation':'h', 'y':-0.12},
+                                       margin={'t':65,'b':90})
+                    st.plotly_chart(plot, use_container_width=True)
+                    st.markdown('**Hourly details**')
+                    show = ['local_date', 'hour', 'weather_regime', 'carwashes',
+                            'prediction_baseline', 'prediction_boosted_calendar', 'prediction_boosted_weather',
+                            'forecast_rain_target_mm', 'forecast_rain_prior_72h_mm', 'inferred_zero']
+                    st.dataframe(period[[c for c in show if c in period.columns]].round(2),
+                                 use_container_width=True, hide_index=True)
+                    st.caption('The plotted rainfall used for predictions is the archived forecast known when '
+                               'the prediction was issued. Reconstructed historical rain, if supplied, is '
+                               'retrospective context, NOT a model input. A 72-hour accumulation alone does '
+                               'not show exactly when it last rained. Predictions cover only the held-out '
+                               'forecast horizon, not the full three preceding days.')
+        st.warning('This is development/validation, not a new untouched test set. '
+                   'Weekly archived forecasts still confound lead horizon with weekday. '
+                   'Check inferred zeros and closures before interpreting extreme weeks.')

@@ -57,7 +57,15 @@ def parse_timestamps(values: pd.Series, timezone: str | None, field: str) -> pd.
 
 
 def load_traffic(path: str, timezone: str) -> pd.DataFrame:
-    raw = pd.read_csv(path, dtype={'location_id': 'string'})
+    raw = pd.read_csv(path, dtype={'location_id': 'string', 'location_code_id': 'string'})
+    # Accept the car-wash SQL export columns without requiring a separate rename step.
+    aliases = {'hour': 'timestamp', 'location_code_id': 'location_id',
+               'num_carwashes': 'carwashes'}
+    for old, new in aliases.items():
+        if old in raw.columns:
+            if new in raw.columns:
+                raise ValueError(f'Both {old} and {new} are present in the traffic CSV; rename one')
+            raw = raw.rename(columns={old: new})
     missing = sorted(set(TRAFFIC_COLS) - set(raw.columns))
     if missing:
         raise ValueError(f"Traffic file missing: {', '.join(missing)}; expected {TRAFFIC_COLS}")
@@ -207,14 +215,78 @@ def prepare(traffic: pd.DataFrame, weather: pd.DataFrame, timezone: str) -> pd.D
     return add_calendar_features(joined,timezone)
 
 
-def quality_report(traffic: pd.DataFrame, closures: set, timezone: str, open_hour: int, close_hour: int) -> dict:
+def open_hour_mask(local: pd.Series, open_hour: int = 8,
+                   close_hour: int = 19, sunday_open_hour: int | None = None) -> pd.Series:
+    """Scheduled timestamp starts: Monday-Saturday 08:00, Sunday 09:00, close 19:00.
+
+    If sunday_open_hour is None, use the weekday opening time (compatibility
+    for older helper calls). The 19:00 hour is not included.
+    """
+    sunday_start = open_hour if sunday_open_hour is None else sunday_open_hour
+    opens = np.where(local.dt.dayofweek == 6, sunday_start, open_hour)
+    return (local.dt.hour >= opens) & (local.dt.hour < close_hour)
+
+
+def fill_missing_open_hours(traffic: pd.DataFrame, closures: set, timezone: str,
+                            open_hour: int = 8, close_hour: int = 19,
+                            sunday_open_hour: int = 9) -> tuple[pd.DataFrame, dict]:
+    """Fill absent ticket-count hours within each site's observed period with zero.
+
+    This assumes no tickets while operating means zero washes. Never extrapolate
+    before the first recorded hour or after the last recorded hour for that site;
+    exclude known closed dates. Audit inferred full zero-days; they may be outages.
+    """
+    if traffic.empty:
+        raise ValueError('Cannot generate operating hours from an empty traffic table')
+    pieces = []
+    summary = {}
+    for site, g in traffic.groupby('location_id', sort=False):
+        first, last = g.timestamp.min(), g.timestamp.max()
+        # UTC grid handles DST transitions, including duplicate local fall-back hours.
+        all_hours = pd.Series(pd.date_range(first, last, freq='h', tz='UTC'))
+        local = all_hours.dt.tz_convert(timezone)
+        keep = open_hour_mask(local, open_hour, close_hour, sunday_open_hour)
+        keep &= ~pd.Series([(str(site), d) in closures for d in local.dt.date])
+        hours = pd.DatetimeIndex(all_hours.loc[keep].tolist())
+        frame = pd.DataFrame({'location_id': str(site), 'timestamp': hours})
+        frame = frame.merge(g[['timestamp', 'carwashes']], on='timestamp', how='left',
+                            validate='one_to_one')
+        frame['inferred_zero'] = frame.carwashes.isna()
+        frame['carwashes'] = frame.carwashes.fillna(0).astype('int64')
+        frame['latitude'] = float(g.latitude.median())
+        frame['longitude'] = float(g.longitude.median())
+        loc = frame.timestamp.dt.tz_convert(timezone)
+        days = loc.dt.date
+        full_days = [str(d) for d, dg in frame.groupby(days)
+                     if bool(dg.inferred_zero.all())]
+        summary[str(site)] = {
+            'observed_operating_hours': int((~frame.inferred_zero).sum()),
+            'inferred_zero_hours': int(frame.inferred_zero.sum()),
+            'fully_inferred_zero_dates': full_days,
+            'first_observed_hour_utc': str(first),
+            'last_observed_hour_utc': str(last),
+        }
+        pieces.append(frame)
+    filled = pd.concat(pieces, ignore_index=True)
+    filled = filled[['timestamp','location_id','latitude','longitude','carwashes','inferred_zero']]
+    filled = filled.sort_values(['location_id','timestamp']).reset_index(drop=True)
+    return filled, {'per_site': summary, 'total_inferred_zero_hours':
+                    int(filled.inferred_zero.sum()),
+                    'warning': ('Inferred zeros are assumptions, not verified counts. '
+                                'Review fully inferred days for closures, outages or export gaps.')}
+
+
+def quality_report(traffic: pd.DataFrame, closures: set, timezone: str,
+                   open_hour: int, close_hour: int,
+                   sunday_open_hour: int | None = None) -> dict:
     sites = {}
     for site, g in traffic.groupby('location_id'):
         local = g.timestamp.dt.tz_convert(timezone)
         first = local.min().normalize()
         last = local.max().normalize()+pd.DateOffset(days=1)
         grid = pd.date_range(start=first,end=last,freq='h',inclusive='left')
-        scheduled = grid[(grid.hour >= open_hour) & (grid.hour < close_hour)]
+        scheduled = grid[open_hour_mask(pd.Series(grid), open_hour, close_hour,
+                                        sunday_open_hour).to_numpy()]
         expected = pd.DatetimeIndex([ts for ts in scheduled if (site,ts.date()) not in closures]).tz_convert('UTC')
         observed = pd.DatetimeIndex(g.timestamp)
         missing = expected.difference(observed)
@@ -222,8 +294,8 @@ def quality_report(traffic: pd.DataFrame, closures: set, timezone: str, open_hou
                        'missing_nominal_open_hours':int(len(missing)),
                        'missing_pct':round(100*len(missing)/max(1,len(expected)),2),
                        'first_observed':str(g.timestamp.min()),'last_observed':str(g.timestamp.max()),
-                       'warning':'Missing is unknown; it is never converted to a zero count.'}
-    return {'sites':sites,'disclaimer':'Nominal hours are based on --open-hour and --close-hour, not confirmed operating schedules.'}
+                       'inferred_zero_hours':int(g.inferred_zero.sum()) if 'inferred_zero' in g else 0}
+    return {'sites':sites,'disclaimer':'Nominal operating hours are assumptions; inferred zeros require validation against outages and closures.'}
 
 
 def feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
@@ -315,16 +387,20 @@ def model_metrics(true: np.ndarray,pred: np.ndarray) -> dict:
             'observations':int(len(true))}
 
 
-def future_hours(start_date: date, days: int, timezone: str, open_hour: int, close_hour: int) -> pd.DatetimeIndex:
+def future_hours(start_date: date, days: int, timezone: str, open_hour: int,
+                 close_hour: int, sunday_open_hour: int | None = None) -> pd.DatetimeIndex:
     start = pd.Timestamp(start_date).tz_localize(ZoneInfo(timezone))
     end = start + pd.DateOffset(days=days)
     local = pd.date_range(start,end,freq='h',inclusive='left')
-    return local[(local.hour>=open_hour)&(local.hour<close_hour)].tz_convert('UTC')
+    schedule = open_hour_mask(pd.Series(local), open_hour, close_hour, sunday_open_hour)
+    return local[schedule.to_numpy()].tz_convert('UTC')
 
 
 def build_future(traffic: pd.DataFrame, weather: pd.DataFrame, forecast_start: date,
-                 forecast_days: int, timezone: str, open_hour: int, close_hour: int, closures: set):
-    hours = future_hours(forecast_start,forecast_days,timezone,open_hour,close_hour)
+                 forecast_days: int, timezone: str, open_hour: int, close_hour: int,
+                 closures: set, sunday_open_hour: int | None = None):
+    hours = future_hours(forecast_start,forecast_days,timezone,open_hour,close_hour,
+                         sunday_open_hour)
     sites = traffic.groupby('location_id',as_index=False)[['latitude','longitude']].median()
     pieces=[]
     for _,s in sites.iterrows():
@@ -349,18 +425,24 @@ def run(args) -> None:
     max_ts=traffic.timestamp.max()
     traffic=traffic[traffic.timestamp >= max_ts - pd.Timedelta(days=args.train_days)].copy()
     local=traffic.timestamp.dt.tz_convert(args.timezone)
-    traffic=traffic[(local.dt.hour>=args.open_hour)&(local.dt.hour<args.close_hour)].copy()
+    traffic=traffic[open_hour_mask(local,args.open_hour,args.close_hour,
+                                   args.sunday_open_hour)].copy()
     local=traffic.timestamp.dt.tz_convert(args.timezone)
     known_closed=pd.Series(list(zip(traffic.location_id,local.dt.date)),index=traffic.index).isin(closures)
     traffic=traffic[~known_closed].copy()
     if traffic.empty:
         raise ValueError('No usable traffic rows after filtering')
-    print(f'Loaded {len(traffic):,} hourly observations, {traffic.location_id.nunique()} sites; {full_count-len(traffic):,} outside window/schedule/closures')
-    report=quality_report(traffic,closures,args.timezone,args.open_hour,args.close_hour)
+    prefill_report=quality_report(traffic,closures,args.timezone,args.open_hour,
+                                  args.close_hour,args.sunday_open_hour)
+    traffic,fill_report=fill_missing_open_hours(traffic,closures,args.timezone,
+                           args.open_hour,args.close_hour,args.sunday_open_hour)
+    print(f'Loaded {len(traffic):,} hourly observations, {traffic.location_id.nunique()} sites; '
+          f'{fill_report["total_inferred_zero_hours"]:,} zero-count hours inferred.')
+    report={'before_fill':prefill_report,'zero_fill':fill_report}
     out=Path(args.output)
     out.mkdir(parents=True,exist_ok=True)
     (out/'data_quality.json').write_text(json.dumps(report,indent=2))
-    print('Data quality: missing nominal hours are reported but NOT filled with zeros.')
+    print('Data quality: absent operating hours filled as zero; see data_quality.json for flagged full-day gaps.')
     if args.weather_csv:
         weather=load_weather(args.weather_csv)
         source='supplied offline weather CSV'
@@ -408,7 +490,7 @@ def run(args) -> None:
     all_predictions.to_csv(out/'validation_predictions.csv',index=False)
     winner=compare.iloc[0]['model']
     start=date.fromisoformat(args.forecast_start) if args.forecast_start else pd.Timestamp.now(tz=args.timezone).date()+timedelta(days=1)
-    future=build_future(traffic,weather,start,args.forecast_days,args.timezone,args.open_hour,args.close_hour,closures)
+    future=build_future(traffic,weather,start,args.forecast_days,args.timezone,args.open_hour,args.close_hour,closures,args.sunday_open_hour)
     # Refit the best model on all labeled hours before making the forward forecast.
     print(f'Refitting best model ({winner}) on all {len(df):,} rows ...')
     best_model=fit_model(winner,df)
@@ -429,7 +511,7 @@ def run(args) -> None:
     meta={'model':winner,'weather_source':source,'site_count':int(df.location_id.nunique()),
           'usable_labeled_hours':int(len(df)),'training_window_days':args.train_days,
           'validation_start_local':str(cutoff),'forecast_start_local':str(start),
-          'timezone':args.timezone,'open_hour':args.open_hour,'close_hour':args.close_hour,
+          'timezone':args.timezone,'open_hour':args.open_hour,'sunday_open_hour':args.sunday_open_hour,'close_hour':args.close_hour,
           'weather_observation_leakage_warning': 'Historical features are realized/reconstructed weather, not archived as-of forecast runs. Backtest scores are optimistic for real next-day / 7-day decisions.',
           'interval_warning':'Illustrative 80% validation-residual bands, not independently calibrated and not guaranteed conditional coverage; summing hourly bands is not a calibrated daily interval.',
           'forecast_weather_gap_hours':int(future.temperature_2m.isna().sum()),
@@ -516,7 +598,8 @@ def create_parser():
     r.add_argument('--weather-csv',help='offline combined observed + future weather CSV; omitted = API')
     r.add_argument('--closures',help='optional site closure calendar: location_id,date')
     r.add_argument('--timezone',default='America/Chicago',help='timezone for naive input and local operating hours')
-    r.add_argument('--open-hour',type=int,default=7)
+    r.add_argument('--open-hour',type=int,default=8,help='Monday-Saturday opening hour (default 8)')
+    r.add_argument('--sunday-open-hour',type=int,default=9,help='Sunday opening hour (default 9)')
     r.add_argument('--close-hour',type=int,default=19)
     r.add_argument('--train-days',type=int,default=90)
     r.add_argument('--validation-days',type=int,default=14)
@@ -536,8 +619,8 @@ def main(argv=None):
             ap.error('demo needs >=35 days and >=1 site')
         generate_demo(args)
     elif args.command=='run':
-        if not 0<=args.open_hour<args.close_hour<=24:
-            ap.error('Expected 0 <= --open-hour < --close-hour <= 24')
+        if not 0<=args.open_hour<args.close_hour<=24 or not 0<=args.sunday_open_hour<args.close_hour:
+            ap.error('Operating hours must satisfy 0 <= both opening hours < closing hour <= 24')
         if not 1<=args.forecast_days<=7:
             ap.error('This prototype supports 1-7 future days')
         run(args)

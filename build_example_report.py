@@ -22,17 +22,17 @@ site_daily=daily[daily.location_id==100].copy()
 fig_daily=go.Figure()
 for m in ['baseline','poisson','negbin','boosted','mlp']:
     fig_daily.add_scatter(x=site_daily.local_date,y=site_daily[f'pred_{m}'],name=m,mode='lines+markers')
-fig_daily.update_layout(title='Seven-day forecast: fictitious site 100, Nov 9–15',xaxis_title='Target day',yaxis_title='Predicted washes')
+fig_daily.update_layout(title='Seven-day forecast: fictitious site 100, Nov 9–15 (scheduled hours only)',xaxis_title='Target day',yaxis_title='Predicted washes')
 parts=[]
 for f in (fig_val,fig_compare,fig_daily):
     parts.append(f.to_html(full_html=False,include_plotlyjs=False,config={'responsive':True,'displaylogo':False}))
 html='''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WashCast v0.2 — Offline Example</title><style>body{font-family:system-ui,-apple-system,sans-serif;margin:0;color:#172334;background:#f6f8fb}
+<title>WashCast v0.2.2 — Offline Example</title><style>body{font-family:system-ui,-apple-system,sans-serif;margin:0;color:#172334;background:#f6f8fb}
 main{max-width:1050px;margin:auto;padding:32px 22px}.panel{background:white;padding:24px;border:1px solid #e2e8f0;border-radius:16px;margin:22px 0}
 h1{font-size:32px;margin:0}h2{font-size:20px}p{line-height:1.65}small{color:#59697c}code{background:#e6ecf3;padding:2px 5px;border-radius:4px}
 .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.step{background:#eaf0f7;border-radius:10px;padding:16px}
 @media(max-width:700px){.steps{grid-template-columns:1fr}}</style><script>'''+get_plotlyjs()+'''</script></head><body><main>
-<h1>WashCast v0.2 · Backtest & Forecast</h1><p><b>Entirely synthetic example.</b> No observed company traffic or real archived weather is represented in these charts.</p>
+<h1>WashCast v0.2.2 · Backtest & Forecast</h1><p><b>Entirely synthetic example.</b> No observed company traffic or real archived weather is represented in these charts. Operating hours: Mon–Sat 8 AM–7 PM, Sunday 9 AM–7 PM. Hours with no synthetic ticket record inside each site's observed period are labeled inferred zeros.</p>
 <div class="panel"><h2>How the model trained for the following day</h2><div class="steps">
 <div class="step"><b>1. On Oct 15 at 6 PM</b><p>Known historical traffic and weather up through issuance.</p></div>
 <div class="step"><b>2. Look at issued forecasts</b><p>Archived simulated forecast weather for Oct 16–22, plus location and calendar.</p></div>
