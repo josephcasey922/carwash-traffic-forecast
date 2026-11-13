@@ -6,7 +6,7 @@
       <excludeFolder url="file://$MODULE_DIR$/.weather_cache" />
       <excludeFolder url="file://$MODULE_DIR$/weather_data" />
     </content>
-    <orderEntry type="jdk" jdkName="~\Documents\GitHub\carwash-traffic-forecast-v0.2.6\.venv" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="~\Desktop\projects\carwash-labor-forecast-project\carwash-traffic-forecast\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
   <component name="PyDocumentationSettings">

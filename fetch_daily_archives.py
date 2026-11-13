@@ -15,7 +15,6 @@ import hashlib
 import json
 import os
 import sys
-import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,37 +28,6 @@ import washcast as core
 
 KEYS = ['issued_at', 'location_id', 'timestamp']
 ARCHIVE_COLUMNS = ['issued_at'] + core.WEATHER_COLS
-
-
-class UnexpectedWeatherResponse(RuntimeError):
-    """The API returned a successful HTTP response without usable JSON."""
-
-
-def validate_api_response(response: requests.Response, *args, **kwargs) -> requests.Response:
-    """Catch HTML/empty responses before the core CSV downloader tries resp.json().
-
-    Keep ordinary HTTP errors for the existing HTTPError handler, including the
-    narrowly scoped HTTP 400 'run unavailable' rule.
-    """
-    if not 200 <= response.status_code < 300:
-        return response
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        content_type = response.headers.get('Content-Type', '(not supplied)')
-        preview = response.text.strip().replace('\r', ' ').replace('\n', ' ')[:350]
-        if not preview:
-            preview = '(empty response)'
-        raise UnexpectedWeatherResponse(
-            f'HTTP {response.status_code}, Content-Type {content_type}; '
-            f'expected JSON but got: {preview!r}'
-        ) from exc
-    if not isinstance(payload, dict):
-        raise UnexpectedWeatherResponse(
-            f'HTTP {response.status_code}; expected a JSON object, '
-            f'got {type(payload).__name__}'
-        )
-    return response
 
 
 def read_locations(path: str) -> pd.DataFrame:
@@ -105,7 +73,7 @@ def issued_timestamp(d: date, tz: str, hour: int) -> pd.Timestamp:
 
 
 def completed_pairs(archive: pd.DataFrame, horizon: int, tz: str, hour: int) -> set[tuple[pd.Timestamp,str]]:
-    """Only skip a pair when both forecast days have all operating hours/weather."""
+    """Only skip a pair when every requested target day has archived operating-hour weather."""
     if archive.empty:
         return set()
     completed = set()
@@ -133,27 +101,6 @@ def load_ledger(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def model_run_key(issued_at: pd.Timestamp) -> tuple[str, str]:
-    """An unavailable forecast run is independent of the site coordinates."""
-    run_time = asof.safely_available_run(issued_at).strftime('%Y-%m-%dT%H:%MZ')
-    return asof.MODEL_ID, run_time
-
-
-def unavailable_runs(path: Path) -> set[tuple[str, str]]:
-    return {(r['model'], r['run']) for r in load_ledger(path)
-            if isinstance(r, dict) and 'model' in r and 'run' in r}
-
-
-def record_unavailable(path: Path, model: str, run_time: str, reason: str) -> None:
-    """Remember confirmed missing model runs so reruns don't waste API requests."""
-    with path.open('a', encoding='utf-8') as f:
-        f.write(json.dumps({'model': model, 'run': run_time,
-                            'recorded_utc': datetime.now(timezone.utc).isoformat(),
-                            'reason': reason})+'\n')
-        f.flush()
-        os.fsync(f.fileno())
-
-
 def record_request(ledger_path: Path, day: str, origin: str, site: str):
     """Count *attempted* outbound requests before sending, even if the API errors."""
     with ledger_path.open('a',encoding='utf-8') as f:
@@ -177,14 +124,11 @@ def save_archive(path: Path, old: pd.DataFrame, chunks: list[pd.DataFrame]):
 def run(locations: str, start_date: str, end_date: str, output: str, cache_dir: str,
         max_new_requests: int=100, daily_request_cap: int=250,
         timezone_name: str='America/Chicago', issue_hour: int=18,
-        horizon: int=2, dry_run: bool=False, retry_unavailable_runs: bool=False,
-        request_pause: float=0.25) -> dict:
-    if request_pause < 0:
-        raise ValueError('Request pause must be nonnegative')
+        horizon: int=2, dry_run: bool=False, sundays_only: bool=False) -> dict:
     if max_new_requests < 1 or daily_request_cap < 1:
         raise ValueError('Request limits must be positive')
-    if horizon not in (1,2):
-        raise ValueError('Supported forecast horizon: 1 or 2 days')
+    if horizon not in (1,2,7):
+        raise ValueError('Supported forecast horizon: 1, 2, or 7 days')
     if not 0 <= issue_hour < 24:
         raise ValueError('Issue hour must be between 0 and 23')
     first,last=date.fromisoformat(start_date),date.fromisoformat(end_date)
@@ -199,19 +143,15 @@ def run(locations: str, start_date: str, end_date: str, output: str, cache_dir: 
     if unknown:
         raise ValueError(f'Archive has unknown locations not present in mapping: {sorted(unknown)}')
     complete=completed_pairs(old,horizon,timezone_name,issue_hour)
-    unavailable_path=destination/'unavailable_forecast_runs.jsonl'
-    skipped_runs=unavailable_runs(unavailable_path)
     missing=[]
-    already_unavailable_pairs=0
     seen_keys=set()
     cache_hits=0
     for day in (first+timedelta(days=i) for i in range((last-first).days+1)):
+        if sundays_only and day.weekday() != 6:
+            continue
         issue=issued_timestamp(day,timezone_name,issue_hour)
         for site in sites.itertuples(index=False):
             if (issue,site.location_id) in complete:
-                continue
-            if not retry_unavailable_runs and model_run_key(issue) in skipped_runs:
-                already_unavailable_pairs += 1
                 continue
             params=api_params(site.latitude,site.longitude,issue)
             filename=cached_request_path(cache_dir,params)
@@ -227,9 +167,6 @@ def run(locations: str, start_date: str, end_date: str, output: str, cache_dir: 
     print(f'Missing issuance/site combinations in requested range: {len(missing)}')
     print(f'Approximate unique new HTTP requests needed (before retries): {uncached}')
     print(f'Existing matching cache responses: {cache_hits}')
-    if already_unavailable_pairs:
-        print(f'Known unavailable-run site/date combinations excluded: {already_unavailable_pairs} '
-              '(not downloaded or silently filled)')
     print('Existing combined archive is preserved and new runs are appended. No traffic data required.')
     if dry_run or not missing:
         return {'missing_pairs':len(missing),'unique_new_requests':uncached,'completed':0,'api_attempts':0}
@@ -241,18 +178,10 @@ def run(locations: str, start_date: str, end_date: str, output: str, cache_dir: 
     used_here=0
     downloaded=[]
     processed=0
-    newly_unavailable_pairs=0
-    newly_unavailable_runs=set()
     stop_reason='all requested combinations obtained'
     session=requests.Session()  # No automatic retry of 429 responses.
-    session.hooks['response'].append(validate_api_response)
-    last_request_started = None
     try:
         for day,issue,site,filename in missing:
-            model_run=model_run_key(issue)
-            if model_run in newly_unavailable_runs:
-                newly_unavailable_pairs += 1
-                continue
             is_cached=filename.exists()
             if not is_cached:
                 if used_here>=max_new_requests:
@@ -261,13 +190,7 @@ def run(locations: str, start_date: str, end_date: str, output: str, cache_dir: 
                 if attempted_today>=daily_request_cap:
                     stop_reason=f'local daily request cap of {daily_request_cap} reached'
                     break
-                # Keep bulk backfills comfortably below the free API's per-minute cap.
-                if last_request_started is not None and request_pause:
-                    remaining = request_pause - (time.monotonic() - last_request_started)
-                    if remaining > 0:
-                        time.sleep(remaining)
                 record_request(ledger_path,local_date,str(day),site.location_id)
-                last_request_started = time.monotonic()
                 attempted_today+=1
                 used_here+=1
             try:
@@ -282,35 +205,11 @@ def run(locations: str, start_date: str, end_date: str, output: str, cache_dir: 
                     detail = exc.response.text if exc.response is not None else str(exc)
                 # Show the *actual* API rejection reason; HTTP 400 alone is ambiguous.
                 detail = str(detail).strip().replace('\n', ' ')[:700]
-                model_name, run_time = model_run
-                if status == 400 and 'requested model run is not available' in detail.casefold():
-                    newly_unavailable_runs.add(model_run)
-                    newly_unavailable_pairs += 1
-                    if model_run not in skipped_runs:
-                        record_unavailable(unavailable_path, model_name, run_time, detail)
-                        skipped_runs.add(model_run)
-                    print(f'Unavailable forecast run {model_name} {run_time}; '
-                          'skipping all locations for this run. No substitute data invented.',
-                          flush=True)
-                    continue
+                model_run = asof.safely_available_run(issue).strftime('%Y-%m-%dT%H:%MZ')
                 stop_reason = (f'Open-Meteo HTTP {status} for location {site.location_id}, '
-                               f'model {model_name}, run {run_time}: {detail}')
+                               f'model {asof.MODEL_ID}, run {model_run}: {detail}')
                 print(f'\nSTOPPED: {stop_reason}', file=sys.stderr, flush=True)
                 print('No more API requests will be sent. Existing downloaded data is preserved.',
-                      file=sys.stderr, flush=True)
-                break
-            except UnexpectedWeatherResponse as exc:
-                stop_reason = (f'Unexpected non-JSON Open-Meteo response for '
-                               f'{site.location_id} on {day}: {exc}')
-                print(f'\nSTOPPED: {stop_reason}', file=sys.stderr, flush=True)
-                print('No retries or further requests. Successful forecasts are saved.',
-                      file=sys.stderr, flush=True)
-                break
-            except requests.RequestException as exc:
-                stop_reason = (f'Open-Meteo connection/request error for '
-                               f'{site.location_id} on {day}: {type(exc).__name__}: {exc}')
-                print(f'\nSTOPPED: {stop_reason}', file=sys.stderr, flush=True)
-                print('No retries or further requests. Successful forecasts are saved.',
                       file=sys.stderr, flush=True)
                 break
             # Missing hours must never be silently substituted with guessed values.
@@ -326,21 +225,11 @@ def run(locations: str, start_date: str, end_date: str, output: str, cache_dir: 
                 print(f'Recovered {processed} new location/origin combinations, {used_here} actual requests',flush=True)
     finally:
         save_archive(archive_path,old,downloaded)
-    if stop_reason == 'all requested combinations obtained' and newly_unavailable_runs:
-        stop_reason = (f'all available combinations retrieved; '
-                       f'{len(newly_unavailable_runs)} model run(s) unavailable and left missing')
     print(f'Saved {len(downloaded)} additional location/origin runs to {archive_path}')
-    if newly_unavailable_runs:
-        print(f'Confirmed unavailable model runs this invocation: {len(newly_unavailable_runs)}; '
-              f'site/date combinations left missing: {newly_unavailable_pairs}')
-        print(f'Unavailable runs recorded in {unavailable_path}; '
-              'use --retry-unavailable-runs to check them again later.')
     print(f'New API requests attempted: {used_here}; locally tracked today: {attempted_today}')
     print(f'Stopped: {stop_reason}')
     return {'missing_pairs':len(missing),'completed':len(downloaded),
-            'api_attempts':used_here,'stopped':stop_reason,
-            'unavailable_pairs':already_unavailable_pairs+newly_unavailable_pairs,
-            'unavailable_runs_added':len(newly_unavailable_runs)}
+            'api_attempts':used_here,'stopped':stop_reason}
 
 
 def main():
@@ -356,17 +245,14 @@ def main():
                    help='Locally tracked per-day request ceiling across repeated runs (default 250)')
     p.add_argument('--timezone',default='America/Chicago')
     p.add_argument('--issue-hour',type=int,default=18)
-    p.add_argument('--forecast-days',type=int,default=2,choices=[1,2])
+    p.add_argument('--forecast-days',type=int,default=2,choices=[1,2,7])
     p.add_argument('--dry-run',action='store_true')
-    p.add_argument('--retry-unavailable-runs',action='store_true',
-                   help='Recheck previously unavailable model runs (costs API calls)')
-    p.add_argument('--request-pause',type=float,default=0.25,
-                   help='Minimum seconds between new requests (default 0.25)')
+    p.add_argument('--sundays-only',action='store_true',
+                   help='Check/fetch Sunday 6 PM issuances only for weekly scheduling')
     args=p.parse_args()
     run(args.locations,args.start_date,args.end_date,args.output,args.cache_dir,
         args.max_new_requests,args.daily_request_cap,args.timezone,
-        args.issue_hour,args.forecast_days,args.dry_run,args.retry_unavailable_runs,
-        args.request_pause)
+        args.issue_hour,args.forecast_days,args.dry_run,args.sundays_only)
 
 if __name__=='__main__':
     main()

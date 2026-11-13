@@ -90,7 +90,7 @@ def load_saved_model(folder: Path, name: str, meta: dict):
 
 def issue_time(local_date: date, tz: str, hour: int = 18) -> pd.Timestamp:
     """When a manager would issue a forecast, local time (default 6pm)."""
-    return pd.Timestamp(local_date).tz_localize(ZoneInfo(tz)) + pd.Timedelta(hours=hour)
+    return (pd.Timestamp(local_date) + pd.Timedelta(hours=hour)).tz_localize(ZoneInfo(tz))
 
 
 def safely_available_run(issue_utc: pd.Timestamp) -> pd.Timestamp:
