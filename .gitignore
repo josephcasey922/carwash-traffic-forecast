@@ -33,6 +33,7 @@ weather_data/
 /alignment_oct_nov/
 /adaptation_may_jul*/
 /sunday_weekly_*/
+data/
 *.env
 .env
 # Demo and example outputs are deliberately included in the downloadable ZIP.
